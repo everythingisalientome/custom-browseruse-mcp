@@ -1,0 +1,39 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+.env
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+*.egg
+
+# Testing / coverage
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.pytest_cache/
+
+# IDEs / editors
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Type checkers / caches
+.mypy_cache/
+.cache/
+
+# Logs
+*.log
