@@ -1,2 +1,11 @@
-# custom-browseruse-mcp
-my custom browser use 
+⚠️ LICENSE & PATENT NOTICE
+
+This project is NOT open source.
+
+- No usage rights are granted by default
+- Personal use requires prior written permission
+- Enterprise or commercial use is strictly prohibited
+- This project is patent-bound
+- Downloading or forking does NOT grant a license
+
+See LICENSE, PATENTS, and RESPONSIBLE_USE.md for details.

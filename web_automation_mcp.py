@@ -1,5 +1,5 @@
 from mcp.server.fastmcp import FastMCP
-from bs4 import BeautifulSoup
+import json
 from cdp_client import ChromeCDP
 import base64
 
@@ -26,22 +26,33 @@ async def close_application():
 async def get_page_html():
     return ok(html=cdp.get_html())
 
+@app.tool()
+async def navigate(url: str):
+    """
+    Navigate to a URL without closing the browser.
+    """
+    try:
+        cdp.navigate(url)
+        return ok()
+    except Exception as e:
+        return err("NAVIGATION_FAILED", str(e))
+
 
 # ---------------- Mouse and keyboard tools ----------------
 
 @app.tool()
 async def click(xpath: str):
     try:
-        cdp.wait_for_element(xpath)
         cdp.click(xpath)
         return ok()
     except TimeoutError:
         return err("ELEMENT_NOT_FOUND", xpath)
+    except Exception as e:
+        return err("CLICK_FAILED", str(e))
 
 @app.tool()
 async def type_into(xpath: str, value: str):
     try:
-        cdp.wait_for_element(xpath)
         cdp.fill(xpath, value)
         return ok()
     except TimeoutError:
@@ -50,7 +61,6 @@ async def type_into(xpath: str, value: str):
 @app.tool()
 async def hover(xpath: str):
     try:
-        cdp.wait_for_element(xpath)
         cdp.hover(xpath)
         return ok()
     except TimeoutError:
@@ -77,48 +87,172 @@ async def send_keys(keys: str):
             "message": str(e)
         }
 
+@app.tool()
+async def double_click(xpath: str):
+    """
+    Double-click an element. Useful for selecting text or special UI actions.
+    """
+    try:
+        cdp.double_click(xpath)
+        return ok()
+    except Exception as e:
+        return err("DOUBLE_CLICK_FAILED", str(e))
 
+@app.tool()
+async def drag_and_drop(source_xpath: str, target_xpath: str):
+    """
+    Drag an element from source_xpath and drop it at target_xpath.
+    """
+    try:
+        cdp.drag_and_drop(source_xpath, target_xpath)
+        return ok()
+    except Exception as e:
+        return err("DRAG_FAILED", str(e))
 # ---------------- Discovery tool ----------------
 
 @app.tool()
 async def find_element(fieldName: str):
     """
-    Basic DOM search. LLM retries original action if xpath is returned.
+    Smart Search: Finds visible elements (buttons, inputs, links) where text/id/name 
+    matches the search query (fieldName).
+    Returns a valid XPath if 1 match is found, or a list of candidates if ambiguous.
     """
-    html = cdp.get_html()
-    soup = BeautifulSoup(html, "html.parser")
+    # JS script to find matches and check visibility in one go
+    js_script = f"""
+    (function() {{
+        const query = {json.dumps(fieldName)}.toLowerCase();
+        const candidates = [];
+        
+        // Tags to search
+        const selectors = 'input, button, a, textarea, select, [role="button"]';
+        document.querySelectorAll(selectors).forEach(el => {{
+            // 1. Check Visibility
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            if (rect.width === 0 || style.visibility === 'hidden' || style.display === 'none') return;
+            
+            // 2. Check Match (Text, ID, Name, Placeholder, Aria)
+            const text = (el.innerText || '').toLowerCase();
+            const val = (el.value || '').toLowerCase();
+            const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+            const name = (el.getAttribute('name') || '').toLowerCase();
+            const id = (el.id || '').toLowerCase();
+            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+            
+            if (text.includes(query) || val.includes(query) || ph.includes(query) || 
+                name.includes(query) || id.includes(query) || aria.includes(query)) {{
+                
+                // 3. Generate Simple XPath
+                let xpath = '';
+                if (el.id) {{
+                    xpath = `//*[@id='${{el.id}}']`;
+                }} else {{
+                    // Fallback to a robust text/attribute matcher
+                    const tag = el.tagName.toLowerCase();
+                    if (el.innerText) {{
+                        // Clean text for XPath
+                        const cleanText = el.innerText.trim().substring(0, 30).replace(/'/g, "");
+                        xpath = `//${{tag}}[contains(normalize-space(.), '${{cleanText}}')]`;
+                    }} else if (el.getAttribute('name')) {{
+                        xpath = `//${{tag}}[@name='${{el.getAttribute('name')}}']`;
+                    }} else if (el.getAttribute('placeholder')) {{
+                        xpath = `//${{tag}}[@placeholder='${{el.getAttribute('placeholder')}}']`;
+                    }} else {{
+                        // Last resort: absolute-ish path (handled by client logic usually)
+                        xpath = `//${{tag}}[contains(@class, '${{el.className}}')]`;
+                    }}
+                }}
+                
+                candidates.push({{
+                    tag: el.tagName,
+                    text: el.innerText || el.value || el.getAttribute('aria-label') || '',
+                    xpath: xpath,
+                    attributes: {{ id: el.id, type: el.type, name: el.name }}
+                }});
+            }}
+        }});
+        return candidates;
+    }})()
+    """
+    try:
+        msg_id = cdp._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
+        matches = cdp._recv(msg_id)["result"]["result"]["value"]
+        
+        # 1. Perfect Match
+        if len(matches) == 1:
+            return ok(xpath=matches[0]["xpath"])
+            
+        # 2. No Matches
+        if not matches:
+            return err("NOT_FOUND", f"No visible element found matching '{fieldName}'")
+            
+        # 3. Ambiguous Matches (Let LLM decide)
+        return {
+            "status": "NEEDS_LLM",
+            "message": f"Found {len(matches)} candidates for '{fieldName}'. Please select one.",
+            "candidates": matches[:10] # Limit to 10 to save tokens
+        }
+        
+    except Exception as e:
+        return err("SEARCH_FAILED", str(e))
 
-    matches = []
-
-    for tag in soup.find_all(["input", "button", "textarea"]):
-        text = " ".join([
-            tag.get("id", ""),
-            tag.get("name", ""),
-            tag.get("placeholder", ""),
-            tag.get_text(strip=True)
-        ]).lower()
-
-        if fieldName.lower() in text:
-            matches.append(tag)
-
-    if len(matches) == 1:
-        return ok(xpath=_build_xpath(matches[0]))
-
-    return {
-        "status": "NEEDS_LLM",
-        "fieldName": fieldName,
-        "candidates": [dict(tag.attrs) for tag in matches]
-    }
-
-def _build_xpath(tag):
-    path = []
-    while tag and tag.name != "[document]":
-        siblings = tag.find_previous_siblings(tag.name)
-        path.insert(0, f"{tag.name}[{len(siblings)+1}]")
-        tag = tag.parent
-    return "/" + "/".join(path)
-
-
+@app.tool()
+async def get_interactive_elements(tag_name: str = "button"):
+    """
+    Discovery Tool: Returns a list of ALL visible elements of a specific type (button, input, a).
+    Useful when you don't know the exact name of an element.
+    tag_name options: 'button', 'input', 'a', 'select', 'textarea'
+    """
+    js_script = f"""
+    (function() {{
+        const results = [];
+        // Handle "button" broadly to include input[type=submit] and role=button
+        let selector = '{tag_name}';
+        if ('{tag_name}' === 'button') selector = 'button, input[type="button"], input[type="submit"], [role="button"]';
+        if ('{tag_name}' === 'input') selector = 'input:not([type="hidden"])';
+        
+        document.querySelectorAll(selector).forEach(el => {{
+            // 1. Visibility Check
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            if (rect.width === 0 || style.visibility === 'hidden' || style.display === 'none') return;
+            
+            // 2. Generate XPath
+            let xpath = '';
+            if (el.id) {{
+                xpath = `//*[@id='${{el.id}}']`;
+            }} else {{
+                const tag = el.tagName.toLowerCase();
+                if (el.innerText && el.innerText.trim().length > 0) {{
+                    const cleanText = el.innerText.trim().substring(0, 30).replace(/'/g, "");
+                    xpath = `//${{tag}}[contains(normalize-space(.), '${{cleanText}}')]`;
+                }} else if (el.getAttribute('name')) {{
+                    xpath = `//${{tag}}[@name='${{el.getAttribute('name')}}']`;
+                }} else if (el.getAttribute('aria-label')) {{
+                    xpath = `//${{tag}}[@aria-label='${{el.getAttribute('aria-label')}}']`;
+                }}
+            }}
+            
+            if (xpath) {{
+                results.push({{
+                    tag: el.tagName,
+                    text: el.innerText || el.value || el.getAttribute('aria-label') || 'N/A',
+                    xpath: xpath,
+                    visible: true
+                }});
+            }}
+        }});
+        return results;
+    }})()
+    """
+    
+    try:
+        msg_id = cdp._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
+        result = cdp._recv(msg_id)
+        items = result["result"]["result"]["value"]
+        return ok(count=len(items), elements=items[:50]) # Limit to 50 to prevent context overflow
+    except Exception as e:
+        return err("DISCOVERY_FAILED", str(e))
 
 # ---------------- Wait tools ----------------
 @app.tool()
