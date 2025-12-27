@@ -1425,7 +1425,114 @@ class ChromeCDP:
             return {"x": x, "y": y}
         except Exception:
             return None
-        
+
+    # ---------------- Discovery Helpers ----------------    
+    def find_elements_by_text(self, query: str):
+        """
+        Scans the DOM for visible elements matching the query (text, id, name, etc).
+        Returns a list of dictionaries with element details.
+        """
+        js_script = f"""
+        (function() {{
+            const query = {json.dumps(query)}.toLowerCase();
+            const candidates = [];
+            
+            const selectors = 'input, button, a, textarea, select, [role="button"]';
+            document.querySelectorAll(selectors).forEach(el => {{
+                // 1. Check Visibility
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                if (rect.width === 0 || style.visibility === 'hidden' || style.display === 'none') return;
+                
+                // 2. Check Match
+                const text = (el.innerText || '').toLowerCase();
+                const val = (el.value || '').toLowerCase();
+                const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+                const name = (el.getAttribute('name') || '').toLowerCase();
+                const id = (el.id || '').toLowerCase();
+                const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                
+                if (text.includes(query) || val.includes(query) || ph.includes(query) || 
+                    name.includes(query) || id.includes(query) || aria.includes(query)) {{
+                    
+                    let xpath = '';
+                    if (el.id) {{
+                        xpath = `//*[@id='${{el.id}}']`;
+                    }} else {{
+                        const tag = el.tagName.toLowerCase();
+                        if (el.innerText) {{
+                            const cleanText = el.innerText.trim().substring(0, 30).replace(/'/g, "");
+                            xpath = `//${{tag}}[contains(normalize-space(.), '${{cleanText}}')]`;
+                        }} else if (el.getAttribute('name')) {{
+                            xpath = `//${{tag}}[@name='${{el.getAttribute('name')}}']`;
+                        }} else if (el.getAttribute('placeholder')) {{
+                            xpath = `//${{tag}}[@placeholder='${{el.getAttribute('placeholder')}}']`;
+                        }} else {{
+                            xpath = `//${{tag}}[contains(@class, '${{el.className}}')]`;
+                        }}
+                    }}
+                    
+                    candidates.push({{
+                        tag: el.tagName,
+                        text: el.innerText || el.value || el.getAttribute('aria-label') || '',
+                        xpath: xpath,
+                        attributes: {{ id: el.id, type: el.type, name: el.name }}
+                    }});
+                }}
+            }});
+            return candidates;
+        }})()
+        """
+        msg_id = self._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
+        return self._recv(msg_id)["result"]["result"]["value"]
+
+    def get_all_interactive_elements(self, tag_name: str = "button"):
+        """
+        Returns a list of ALL visible elements of a specific type.
+        """
+        js_script = f"""
+        (function() {{
+            const results = [];
+            let selector = '{tag_name}';
+            if ('{tag_name}' === 'button') selector = 'button, input[type="button"], input[type="submit"], [role="button"]';
+            if ('{tag_name}' === 'input') selector = 'input:not([type="hidden"])';
+            
+            document.querySelectorAll(selector).forEach(el => {{
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                if (rect.width === 0 || style.visibility === 'hidden' || style.display === 'none') return;
+                
+                let xpath = '';
+                if (el.id) {{
+                    xpath = `//*[@id='${{el.id}}']`;
+                }} else {{
+                    const tag = el.tagName.toLowerCase();
+                    if (el.innerText && el.innerText.trim().length > 0) {{
+                        const cleanText = el.innerText.trim().substring(0, 30).replace(/'/g, "");
+                        xpath = `//${{tag}}[contains(normalize-space(.), '${{cleanText}}')]`;
+                    }} else if (el.getAttribute('name')) {{
+                        xpath = `//${{tag}}[@name='${{el.getAttribute('name')}}']`;
+                    }} else if (el.getAttribute('aria-label')) {{
+                        xpath = `//${{tag}}[@aria-label='${{el.getAttribute('aria-label')}}']`;
+                    }}
+                }}
+                
+                if (xpath) {{
+                    results.push({{
+                        tag: el.tagName,
+                        text: el.innerText || el.value || el.getAttribute('aria-label') || 'N/A',
+                        xpath: xpath,
+                        visible: true
+                    }});
+                }}
+            }});
+            return results;
+        }})()
+        """
+        msg_id = self._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
+        return self._recv(msg_id)["result"]["result"]["value"]
+
+    # ---------------- Clean Up Tool ----------------
     def _clean_old_profiles(self, max_age_seconds=300):
         base_dir = r"C:\Users\PreetPragyan\temp" # Your specific temp path
         pattern = os.path.join(base_dir, "cdp-profile-*")

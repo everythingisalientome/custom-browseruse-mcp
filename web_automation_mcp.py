@@ -115,142 +115,36 @@ async def find_element(fieldName: str):
     """
     Smart Search: Finds visible elements (buttons, inputs, links) where text/id/name 
     matches the search query (fieldName).
-    Returns a valid XPath if 1 match is found, or a list of candidates if ambiguous.
-    """
-    # JS script to find matches and check visibility in one go
-    js_script = f"""
-    (function() {{
-        const query = {json.dumps(fieldName)}.toLowerCase();
-        const candidates = [];
-        
-        // Tags to search
-        const selectors = 'input, button, a, textarea, select, [role="button"]';
-        document.querySelectorAll(selectors).forEach(el => {{
-            // 1. Check Visibility
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            if (rect.width === 0 || style.visibility === 'hidden' || style.display === 'none') return;
-            
-            // 2. Check Match (Text, ID, Name, Placeholder, Aria)
-            const text = (el.innerText || '').toLowerCase();
-            const val = (el.value || '').toLowerCase();
-            const ph = (el.getAttribute('placeholder') || '').toLowerCase();
-            const name = (el.getAttribute('name') || '').toLowerCase();
-            const id = (el.id || '').toLowerCase();
-            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-            
-            if (text.includes(query) || val.includes(query) || ph.includes(query) || 
-                name.includes(query) || id.includes(query) || aria.includes(query)) {{
-                
-                // 3. Generate Simple XPath
-                let xpath = '';
-                if (el.id) {{
-                    xpath = `//*[@id='${{el.id}}']`;
-                }} else {{
-                    // Fallback to a robust text/attribute matcher
-                    const tag = el.tagName.toLowerCase();
-                    if (el.innerText) {{
-                        // Clean text for XPath
-                        const cleanText = el.innerText.trim().substring(0, 30).replace(/'/g, "");
-                        xpath = `//${{tag}}[contains(normalize-space(.), '${{cleanText}}')]`;
-                    }} else if (el.getAttribute('name')) {{
-                        xpath = `//${{tag}}[@name='${{el.getAttribute('name')}}']`;
-                    }} else if (el.getAttribute('placeholder')) {{
-                        xpath = `//${{tag}}[@placeholder='${{el.getAttribute('placeholder')}}']`;
-                    }} else {{
-                        // Last resort: absolute-ish path (handled by client logic usually)
-                        xpath = `//${{tag}}[contains(@class, '${{el.className}}')]`;
-                    }}
-                }}
-                
-                candidates.push({{
-                    tag: el.tagName,
-                    text: el.innerText || el.value || el.getAttribute('aria-label') || '',
-                    xpath: xpath,
-                    attributes: {{ id: el.id, type: el.type, name: el.name }}
-                }});
-            }}
-        }});
-        return candidates;
-    }})()
     """
     try:
-        msg_id = cdp._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
-        matches = cdp._recv(msg_id)["result"]["result"]["value"]
+        # Delegate the heavy lifting to the client
+        matches = cdp.find_elements_by_text(fieldName)
         
-        # 1. Perfect Match
         if len(matches) == 1:
             return ok(xpath=matches[0]["xpath"])
             
-        # 2. No Matches
         if not matches:
             return err("NOT_FOUND", f"No visible element found matching '{fieldName}'")
             
-        # 3. Ambiguous Matches (Let LLM decide)
+        # Ambiguous Matches (Let LLM decide)
         return {
             "status": "NEEDS_LLM",
             "message": f"Found {len(matches)} candidates for '{fieldName}'. Please select one.",
-            "candidates": matches[:10] # Limit to 10 to save tokens
+            "candidates": matches[:10] 
         }
-        
     except Exception as e:
         return err("SEARCH_FAILED", str(e))
 
 @app.tool()
 async def get_interactive_elements(tag_name: str = "button"):
     """
-    Discovery Tool: Returns a list of ALL visible elements of a specific type (button, input, a).
-    Useful when you don't know the exact name of an element.
+    Discovery Tool: Returns a list of ALL visible elements of a specific type.
     tag_name options: 'button', 'input', 'a', 'select', 'textarea'
     """
-    js_script = f"""
-    (function() {{
-        const results = [];
-        // Handle "button" broadly to include input[type=submit] and role=button
-        let selector = '{tag_name}';
-        if ('{tag_name}' === 'button') selector = 'button, input[type="button"], input[type="submit"], [role="button"]';
-        if ('{tag_name}' === 'input') selector = 'input:not([type="hidden"])';
-        
-        document.querySelectorAll(selector).forEach(el => {{
-            // 1. Visibility Check
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            if (rect.width === 0 || style.visibility === 'hidden' || style.display === 'none') return;
-            
-            // 2. Generate XPath
-            let xpath = '';
-            if (el.id) {{
-                xpath = `//*[@id='${{el.id}}']`;
-            }} else {{
-                const tag = el.tagName.toLowerCase();
-                if (el.innerText && el.innerText.trim().length > 0) {{
-                    const cleanText = el.innerText.trim().substring(0, 30).replace(/'/g, "");
-                    xpath = `//${{tag}}[contains(normalize-space(.), '${{cleanText}}')]`;
-                }} else if (el.getAttribute('name')) {{
-                    xpath = `//${{tag}}[@name='${{el.getAttribute('name')}}']`;
-                }} else if (el.getAttribute('aria-label')) {{
-                    xpath = `//${{tag}}[@aria-label='${{el.getAttribute('aria-label')}}']`;
-                }}
-            }}
-            
-            if (xpath) {{
-                results.push({{
-                    tag: el.tagName,
-                    text: el.innerText || el.value || el.getAttribute('aria-label') || 'N/A',
-                    xpath: xpath,
-                    visible: true
-                }});
-            }}
-        }});
-        return results;
-    }})()
-    """
-    
     try:
-        msg_id = cdp._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
-        result = cdp._recv(msg_id)
-        items = result["result"]["result"]["value"]
-        return ok(count=len(items), elements=items[:50]) # Limit to 50 to prevent context overflow
+        # Delegate to client
+        items = cdp.get_all_interactive_elements(tag_name)
+        return ok(count=len(items), elements=items[:50])
     except Exception as e:
         return err("DISCOVERY_FAILED", str(e))
 
