@@ -4,7 +4,6 @@ Version 1.1
 Copyright (c) 2025 Preet Panda
 All rights reserved.
 
-THIS SOFTWARE IS PATENT-PENDING AND/OR PATENT-PROTECTED.
 
 NO RIGHTS ARE GRANTED BY DEFAULT.
 
