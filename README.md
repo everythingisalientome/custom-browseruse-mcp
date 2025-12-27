@@ -8,4 +8,4 @@ This project is NOT open source.
 - This project is patent-bound
 - Downloading or forking does NOT grant a license
 
-See LICENSE, PATENTS, and RESPONSIBLE_USE.md for details.
+See LICENSE, and RESPONSIBLE_USE.md for details.

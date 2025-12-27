@@ -1,4 +1,4 @@
-Preet Panda Patent-Bound Restricted Use License (PPRUL)
+Preet Panda Restricted Use License (PPRUL)
 Version 1.1
 
 Copyright (c) 2025 Preet Panda
