@@ -46,17 +46,7 @@ This includes (but is not limited to):
 Any such use without authorization constitutes willful infringement.
 
 ------------------------------------------------------------
-4. PATENT RIGHTS
-------------------------------------------------------------
-This software and its underlying methods, workflows, architectures,
-and processes are protected by issued patents and/or pending patent
-applications.
-
-NO PATENT LICENSE is granted under this license, whether express,
-implied, or by estoppel.
-
-------------------------------------------------------------
-5. REDISTRIBUTION
+4. REDISTRIBUTION
 ------------------------------------------------------------
 Redistribution of this software, in source or binary form, modified or
 unmodified, is prohibited without written permission.
@@ -64,7 +54,7 @@ unmodified, is prohibited without written permission.
 Forking does NOT grant redistribution or usage rights.
 
 ------------------------------------------------------------
-6. RESPONSIBLE USE
+5. RESPONSIBLE USE
 ------------------------------------------------------------
 This software must be used responsibly and at the user’s own risk.
 
@@ -79,7 +69,7 @@ This applies EVEN IF the software is used exactly as provided and
 WITHOUT MODIFICATION.
 
 ------------------------------------------------------------
-7. NO WARRANTY
+6. NO WARRANTY
 ------------------------------------------------------------
 THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
 EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF
@@ -87,7 +77,7 @@ MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY,
 RELIABILITY, OR NON-INFRINGEMENT.
 
 ------------------------------------------------------------
-8. LIMITATION OF LIABILITY
+7. LIMITATION OF LIABILITY
 ------------------------------------------------------------
 IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM,
 DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,

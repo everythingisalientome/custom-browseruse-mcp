@@ -9,3 +9,5 @@ This project is NOT open source.
 - Downloading or forking does NOT grant a license
 
 See LICENSE, and RESPONSIBLE_USE.md for details.
+
+Ideas Help: https://www.youtube.com/watch?v=ftUDZwlkbxg
