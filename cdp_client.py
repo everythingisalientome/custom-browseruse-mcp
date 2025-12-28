@@ -1381,7 +1381,146 @@ class ChromeCDP:
             
         time.sleep(0.2)
 
-    #multi select
+    def select_autocomplete_option(self, input_xpath: str, select_text: str):
+        """
+        Simpler Autocomplete:
+        1. Focuses input.
+        2. Types 'select_text' one char at a time.
+        3. After EACH char, checks if 'select_text' option is visible.
+        4. If found, clicks immediately and stops typing.
+        """
+        self._ensure_page_actionable()
+
+        #1: Get Stable Reference & Focus
+        obj_id = self._get_object_id(input_xpath)
+        if not obj_id:
+            raise RuntimeError(f"Autocomplete input not found: {input_xpath}")
+
+        print(f"Focusing input: {input_xpath}")
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+        self._send("Runtime.callFunctionOn", {
+            "functionDeclaration": "function() { this.focus(); this.value = ''; }",
+            "objectId": obj_id
+        })
+
+        #2: Type and Check Loop        
+        check_js = f"""
+        (function() {{
+            const query = {json.dumps(select_text)}.toLowerCase().trim();
+            // Search all potential list items
+            const candidates = document.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
+            
+            for (const el of candidates) {{
+                // 1. Visibility Check
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+                const rect = el.getBoundingClientRect();
+                if (rect.width < 5 || rect.height < 5) continue;
+
+                // 2. Text Match
+                const text = el.innerText.toLowerCase().trim();
+                
+                // We want the element that IS the option, not just contains it
+                // So we check if the text matches closely
+                if (text === query || (text.includes(query) && text.length < query.length + 30)) {{
+                    return true;
+                }}
+            }}
+            return false;
+        }})()
+        """
+
+        found = False
+        print(f"Typing '{select_text}'...")
+
+        for i, char in enumerate(select_text):
+            # A. Type the character
+            self._send("Input.dispatchKeyEvent", {"type": "keyDown", "text": char, "key": char})
+            self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
+            self._send("Input.dispatchKeyEvent", {"type": "keyUp", "text": char, "key": char})
+            
+            # B. Small delay for JS to react
+            time.sleep(0.1) 
+
+            # C. Check if target appeared (Start checking after 2nd char to save resources)
+            if i >= 1: 
+                msg_id = self._send("Runtime.evaluate", {"expression": check_js})
+                if self._recv(msg_id)["result"]["result"]["value"]:
+                    print(f"Target '{select_text}' appeared! Stopping input.")
+                    found = True
+                    break
+        
+        # 3: Click the result
+        if not found:
+            # wait one last second
+            time.sleep(1.0)
+            
+        self._select_visible_option(select_text)
+
+
+    def _select_visible_option(self, option_text):
+        """
+        Helper: Finds and clicks the best matching visible option.
+        """
+        # Find Best Option using Scoring Logic
+        expr = f"""
+        (function() {{
+            const query = {json.dumps(option_text)}.toLowerCase().trim();
+            const candidates = document.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
+            
+            let bestEl = null;
+            let bestScore = -1;
+            
+            for (const el of candidates) {{
+                // Visibility
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                if (rect.width < 5 || rect.height < 5 || 
+                    style.visibility === 'hidden' || style.display === 'none' || 
+                    style.opacity === '0') continue;
+                
+                const text = el.innerText.toLowerCase().trim();
+                if (!text.includes(query)) continue;
+                
+                // Scoring
+                let score = 0;
+                if (text === query) score += 100; // Exact match
+                if (el.tagName === 'LI' || el.getAttribute('role') === 'option') score += 50; // Semantic
+                if (text.length > query.length + 50) score -= 1000; // Penalty for wrappers
+                if (el.querySelector('.highlight') || el.classList.contains('highlight')) score += 20;
+
+                if (score > bestScore) {{
+                    bestScore = score;
+                    bestEl = el;
+                }}
+            }}
+            return bestEl;
+        }})()
+        """
+
+        msg_id = self._send("Runtime.evaluate", {"expression": expr, "returnByValue": False})
+        result = self._recv(msg_id)
+        remote_obj = result["result"]["result"]
+        
+        if remote_obj.get("subtype") == "null" or "objectId" not in remote_obj:
+            raise RuntimeError(f"Option '{option_text}' not found.")
+
+        option_id = remote_obj["objectId"]
+
+        # Robust Click via ID
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": option_id})
+        point = self._get_center_by_id(option_id)
+        
+        if point:
+            self.mouse_move(point["x"], point["y"])
+            self.mouse_down(point["x"], point["y"])
+            self.mouse_up(point["x"], point["y"])
+        else:
+            self._send("Runtime.callFunctionOn", {
+                "functionDeclaration": "function() { this.click(); }",
+                "objectId": option_id
+            })
+
     def multi_select(self, select_xpath: str, values: list[str]):
         self._ensure_page_actionable()
 

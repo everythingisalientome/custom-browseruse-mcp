@@ -262,3 +262,17 @@ async def select_custom_dropdown(trigger_xpath: str, option_text: str):
         return ok()
     except Exception as e:
         return err("CUSTOM_SELECT_FAILED", str(e))
+    
+@app.tool()
+async def select_autocomplete(input_xpath: str, select_text: str):
+    """
+    Selects from a 'Type-to-Filter' dropdown.
+    1. Focuses the input (input_xpath).
+    2. Types 'select_text' character by character.
+    3. Clicks 'select_text' as soon as it appears in the list.
+    """
+    try:
+        cdp.select_autocomplete_option(input_xpath, select_text)
+        return ok()
+    except Exception as e:
+        return err("AUTOCOMPLETE_FAILED", str(e))
