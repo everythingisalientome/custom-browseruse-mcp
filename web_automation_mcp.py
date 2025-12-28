@@ -72,20 +72,16 @@ async def press_key(key: str):
     return ok()
 
 @app.tool()
-async def send_keys(keys: str):
+async def send_keys(keys: str, xpath: str = None):
     """
-    Send special or combo keys.
-    Examples: 'Enter', 'Tab', 'Ctrl+A', 'Ctrl+Shift+Tab'
+    Send special keys or shortcuts (e.g. 'Enter', 'Tab', 'Ctrl+A').
+    If xpath is provided, focuses that element before sending.
     """
     try:
-        cdp.send_keys(keys)
+        cdp.send_keys(keys, xpath)
         return {"status": "OK"}
     except Exception as e:
-        return {
-            "status": "ERROR",
-            "error_code": "KEY_ERROR",
-            "message": str(e)
-        }
+        return err("KEY_ERROR", str(e))
 
 @app.tool()
 async def double_click(xpath: str):
@@ -250,3 +246,19 @@ async def multi_select_dropdown(xpath: str, values: list[str]):
             "error_code": "MULTI_SELECT_FAILED",
             "message": str(e)
         }
+
+@app.tool()
+async def select_custom_dropdown(trigger_xpath: str, option_text: str):
+    """
+    Selects an item from a modern UI dropdown (React/Vue/Angular/MUI).
+    Use this when standard 'select_dropdown' fails.
+    
+    Args:
+        trigger_xpath: The XPath of the input/div you click to open the list.
+        option_text: The visible text of the option you want to choose.
+    """
+    try:
+        cdp.select_custom_option(trigger_xpath, option_text)
+        return ok()
+    except Exception as e:
+        return err("CUSTOM_SELECT_FAILED", str(e))

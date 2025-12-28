@@ -75,6 +75,10 @@ KEY_MAP = {
     "ArrowDown": ("ArrowDown", "ArrowDown"),
     "ArrowLeft": ("ArrowLeft", "ArrowLeft"),
     "ArrowRight": ("ArrowRight", "ArrowRight"),
+    "Home": ("Home", "Home"),
+    "End": ("End", "End"),
+    "PageUp": ("PageUp", "PageUp"),
+    "PageDown": ("PageDown", "PageDown"),
 }
 
 
@@ -1008,7 +1012,7 @@ class ChromeCDP:
         Robustly waits for the page to be fully loaded and stable.
         Checks:
         1. document.readyState == 'complete'
-        2. Network is idle (no active requests > 500ms)
+        2. Network is idle (Soft Check - doesn't block if busy)
         3. DOM is stable (no mutations > 500ms)
         """
         deadline = time.monotonic() + timeout_ms / 1000
@@ -1025,24 +1029,22 @@ class ChromeCDP:
                     time.sleep(0.1)
                     continue
 
-                # 2. Network Idle Check (Crucial for SPAs)
-                # We use a short timeout (2s) for the check itself, but require 500ms of silence.
+                # 2. Network Idle Check (SOFT CHECK)
+                # If network is busy (analytics/ads) try to wait, but if times out, proceed anyway
                 try:
                     self.wait_for_network_idle(timeout_ms=2000, idle_ms=500)
                 except TimeoutError:
-                    # If network is busy, loop back and wait more (unless global deadline hit)
-                    if time.monotonic() > deadline: raise
-                    continue
+                    pass 
 
                 # 3. DOM Stability Check (Crucial for Hydration/Animations)
-                # Waits for the HTML to stop shifting/growing for 500ms.
+                # Waits for the HTML to stop shifting/growing for 500ms
                 try:
                     self.wait_for_dom_stable(timeout_ms=2000, idle_ms=500)
                 except TimeoutError:
                     if time.monotonic() > deadline: raise
                     continue
 
-                # If we passed all 3 gauntlets, the page is truly ready.
+                # return if lifecycle and DOM stability pass
                 return
 
             except Exception:
@@ -1051,17 +1053,34 @@ class ChromeCDP:
 
         raise TimeoutError(f"Page failed to stabilize within {timeout_ms}ms")
 
-    def send_keys(self, keys: str):
+    def send_keys(self, keys: str, xpath: str = None):
         """
-        Send keyboard shortcuts or special keys.
-        Example: 'Enter', 'Ctrl+A', 'Ctrl+Shift+Tab'
+        Send keyboard shortcuts or keys.
+        Supports combos like 'Ctrl+A', 'Shift+Enter'.
+        If xpath is provided, focuses that element first.
         """
-        # Global readiness gate (same as click/fill)
         self._ensure_page_actionable()
 
-        modifiers, key = self._parse_key_combo(keys)
+        # 1. Target Specific Element (if requested)
+        if xpath:
+            # Robust Object ID pattern
+            obj_id = self._get_object_id(xpath)
+            if not obj_id:
+                raise RuntimeError(f"Cannot send keys; element not found: {xpath}")
 
-        # Modifier bitmask (CDP spec)
+            self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+            
+            # Force focus via JS
+            self._send("Runtime.callFunctionOn", {
+                "functionDeclaration": "function() { this.focus(); }",
+                "objectId": obj_id
+            })
+            time.sleep(0.1) # Small delay for focus to register
+
+        # 2. Parse Keys
+        modifiers, key = self._parse_key_combo(keys)
+        
+        # Modifier bitmask (CDP spec: Alt=1, Ctrl=2, Meta/Cmd=4, Shift=8)
         mod_mask = (
             (2 if modifiers["Control"] else 0) |
             (8 if modifiers["Shift"] else 0) |
@@ -1072,21 +1091,42 @@ class ChromeCDP:
         # Resolve key/code
         if key in KEY_MAP:
             key_val, code_val = KEY_MAP[key]
-        elif len(key) == 1 and key.isalpha():
-            key_val = key.lower()
-            code_val = f"Key{key.upper()}"
-        else:
-            raise ValueError(f"Unsupported key: {keys}")
+            # Special handling for "Enter" which often needs 'rawKeyDown'
+            type_down = "rawKeyDown" if key == "Enter" else "keyDown"
 
-        # KeyDown
+        elif len(key) == 1:
+            # Handle regular characters (a-z, 0-9)
+            # If Shift is held (e.g. Shift+a), we usually want 'A'
+            if modifiers["Shift"]:
+                key_val = key.upper()
+            else:
+                key_val = key
+            
+            # Simple heuristic for code
+            if key.isalpha():
+                code_val = f"Key{key.upper()}"
+            elif key.isdigit():
+                code_val = f"Digit{key}"
+            else:
+                code_val = "Unidentified"
+            
+            type_down = "keyDown"
+        else:
+             # Fallback for unknown keys
+            key_val = key
+            code_val = "Unidentified"
+            type_down = "keyDown"
+
+        # 3. Dispatch Events (KeyDown -> KeyUp)
         self._send("Input.dispatchKeyEvent", {
-            "type": "keyDown",
+            "type": type_down,
             "key": key_val,
             "code": code_val,
-            "modifiers": mod_mask
+            "modifiers": mod_mask,
+            "windowsVirtualKeyCode": 0, 
+            "nativeVirtualKeyCode": 0
         })
-
-        # KeyUp
+        
         self._send("Input.dispatchKeyEvent", {
             "type": "keyUp",
             "key": key_val,
@@ -1186,7 +1226,6 @@ class ChromeCDP:
         })
         return result["result"]["result"]["value"] is True
     
-
     def is_selected(self, xpath: str) -> bool:
         # 1. Get Stable Reference
         obj_id = self._get_object_id(xpath)
@@ -1257,6 +1296,90 @@ class ChromeCDP:
         if result.get("value") is not True:
             raise RuntimeError(f"Option not found (Value: {value}, Label: {label}, Index: {index})")
 
+    def select_custom_option(self, trigger_xpath: str, option_text: str):
+        """
+        Selects an item from a modern dropdown using a 'Best Match' scoring system.
+        Prioritizes Exact Matches and Semantic Tags (li, role=option) over generic text.
+        """
+        self._ensure_page_actionable()
+
+        # Step 1: Open Dropdown
+        print(f"Clicking dropdown trigger: {trigger_xpath}")
+        self.click(trigger_xpath)
+        time.sleep(0.5) 
+
+        # Step 2: Find Best Option using Scoring Logic
+        expr = f"""
+        (function() {{
+            const query = {json.dumps(option_text)}.toLowerCase();
+            const candidates = document.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
+            
+            let bestEl = null;
+            let bestScore = -1;
+            
+            for (const el of candidates) {{
+                // 1. Strict Visibility Check
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                if (rect.width < 5 || rect.height < 5 || 
+                    style.visibility === 'hidden' || style.display === 'none' || 
+                    style.opacity === '0') continue;
+                
+                const text = el.innerText.toLowerCase().trim();
+                if (!text.includes(query)) continue;
+                
+                // --- SCORING SYSTEM ---
+                let score = 0;
+                
+                // Rule A: Exact Match is King (Score: +100)
+                if (text === query) score += 100;
+                
+                // Rule B: Semantic Tags are Queen (Score: +50)
+                // Prefer actual list items over generic divs
+                if (el.tagName === 'LI' || el.getAttribute('role') === 'option') score += 50;
+                
+                // Rule C: Penalize "Wrapper" Containers (Score: -1000)
+                // If a div contains the text but also 50 other characters, it's likely a parent, not the button.
+                if (text.length > query.length + 50) score -= 1000;
+                
+                // Update Best Candidate
+                if (score > bestScore) {{
+                    bestScore = score;
+                    bestEl = el;
+                }}
+            }}
+            return bestEl;
+        }})()
+        """
+
+        # 3. Get ID
+        msg_id = self._send("Runtime.evaluate", {
+            "expression": expr, 
+            "returnByValue": False 
+        })
+        result = self._recv(msg_id)
+        remote_obj = result["result"]["result"]
+        
+        if remote_obj.get("subtype") == "null" or "objectId" not in remote_obj:
+            raise RuntimeError(f"Option '{option_text}' not found (or visible) after clicking trigger.")
+
+        option_id = remote_obj["objectId"]
+
+        # 4. Click
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": option_id})
+        point = self._get_center_by_id(option_id)
+        
+        if point:
+            self.mouse_move(point["x"], point["y"])
+            self.mouse_down(point["x"], point["y"])
+            self.mouse_up(point["x"], point["y"])
+        else:
+            self._send("Runtime.callFunctionOn", {
+                "functionDeclaration": "function() { this.click(); }",
+                "objectId": option_id
+            })
+            
+        time.sleep(0.2)
 
     #multi select
     def multi_select(self, select_xpath: str, values: list[str]):
