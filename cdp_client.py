@@ -900,8 +900,6 @@ class ChromeCDP:
                 self.tracer.dump()
             raise
 
-
-
     def click(self, xpath, timeout_ms=10000):
         entry = self.tracer.start_step(action="click", target=xpath) if self.tracer.enabled else None
         deadline = time.monotonic() + timeout_ms / 1000
@@ -1176,6 +1174,74 @@ class ChromeCDP:
         result = self._recv(msg_id)["result"]["result"]
         return result.get("value") is True
 
+    def type_human(self, xpath: str, text: str):
+        """
+        Types text like a human:
+        1. Focuses the element.
+        2. Physically selects all text (Ctrl+A) and deletes it (Backspace).
+        3. Types the new text one char at a time with delays.
+        """
+        self._ensure_page_actionable()
+
+        # 1. Get ID & Scroll
+        obj_id = self._get_object_id(xpath)
+        if not obj_id:
+             raise RuntimeError(f"Element not found: {xpath}")
+
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+        
+        # 2. Focus to field
+        point = self._get_center_by_id(obj_id)
+        if point:
+            self.mouse_move(point["x"], point["y"])
+            self.mouse_down(point["x"], point["y"])
+            self.mouse_up(point["x"], point["y"])
+        else:
+            self._send("Runtime.callFunctionOn", {
+                "functionDeclaration": "function() { this.focus(); }",
+                "objectId": obj_id
+            })
+        
+        time.sleep(0.1)
+
+        # 3. Clear using Ctrl+A and Backspace
+        
+        # Press Ctrl (Modifier 2)
+        self._send("Input.dispatchKeyEvent", {
+            "type": "keyDown", "key": "Control", "code": "ControlLeft", "modifiers": 2
+        })
+        
+        # Press A (with Ctrl mod)
+        self._send("Input.dispatchKeyEvent", {
+            "type": "keyDown", "key": "a", "code": "KeyA", "modifiers": 2
+        })
+        self._send("Input.dispatchKeyEvent", { # Char event is needed by some browsers
+            "type": "char", "text": "a" 
+        })
+        self._send("Input.dispatchKeyEvent", {
+            "type": "keyUp", "key": "a", "code": "KeyA", "modifiers": 2
+        })
+        
+        # Release Ctrl
+        self._send("Input.dispatchKeyEvent", {
+            "type": "keyUp", "key": "Control", "code": "ControlLeft", "modifiers": 0
+        })
+
+        time.sleep(0.05)
+
+        # Press Backspace
+        self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Backspace", "code": "Backspace"})
+        self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Backspace", "code": "Backspace"})
+
+        time.sleep(0.1)
+
+        # 4. Human like typeing
+        print(f"Human typing into {xpath}...")
+        for char in text:
+            self._send("Input.dispatchKeyEvent", {"type": "keyDown", "text": char, "key": char})
+            self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
+            self._send("Input.dispatchKeyEvent", {"type": "keyUp", "text": char, "key": char})
+            time.sleep(0.05 + (0.05 * (ord(char) % 3))) # Randomize delay slightly (50ms - 150ms)
 
     # ------------ Screenshot tools ------------
     def screenshot(self, full_page: bool = True):

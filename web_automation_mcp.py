@@ -104,6 +104,23 @@ async def drag_and_drop(source_xpath: str, target_xpath: str):
         return ok()
     except Exception as e:
         return err("DRAG_FAILED", str(e))
+
+@app.tool()
+async def type_like_human(xpath: str, value: str):
+    """
+    Types text slowly, character-by-character, simulating a real user.
+    
+    WHEN TO USE: 
+    - Use this ONLY if the standard 'type_into' tool fails or has no effect.
+    - Use this for strict banking forms, search bars, or sites with bot protection 
+      that ignore instant text entry.
+    """
+    try:
+        cdp.type_human(xpath, value)
+        return ok()
+    except Exception as e:
+        return err("HUMAN_TYPE_FAILED", str(e))
+
 # ---------------- Discovery tool ----------------
 
 @app.tool()
