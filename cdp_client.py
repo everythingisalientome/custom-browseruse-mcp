@@ -14,6 +14,7 @@ import time
 import base64
 import shutil
 import glob
+from pathlib import Path
 
 from tracemanager import TraceManager
 
@@ -51,12 +52,41 @@ def find_free_port():
 
 TRACE_ENABLED = os.getenv("WEB_MCP_TRACE", "0") == "1"
 SCREENSHOT_ON_FAIL = os.getenv("WEB_MCP_SCREENSHOT_ON_FAIL", "0") == "1"
-FULLSCREEN = os.getenv("RUN_WEB_FULLSCREEN", "0") == "1"
 
+
+# --- CONFIGURATION CONSTANTS ---
+
+# Connection
 CHROME_PATH = find_chrome_executable()
-DEBUG_PORT = 9222
+DEBUG_PORT = int(os.getenv("CHROME_DEBUG_PORT", "9222"))
+USER_DATA_DIR = os.getenv("USER_DATA_DIR")
+
+# Global Timeouts (ms)
+DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "10000"))
+PAGE_LOAD_TIMEOUT = int(os.getenv("PAGE_LOAD_TIMEOUT", "15000"))
+NETWORK_TIMEOUT = int(os.getenv("NETWORK_IDLE_TIMEOUT", "2000"))
+DOM_TIMEOUT = int(os.getenv("DOM_STABLE_TIMEOUT", "2000"))
+APP_CLOSE_TIMEOUT = int(os.getenv("APP_CLOSE_TIMEOUT", "2000"))
+
+# Stability Criteria (ms)
+NETWORK_IDLE_MS = int(os.getenv("NETWORK_IDLE_DURATION", "500"))
+DOM_IDLE_MS = int(os.getenv("DOM_STABLE_DURATION", "500"))
+
+# Delays (Seconds - converted from ms)
+HUMAN_DELAY = int(os.getenv("HUMAN_KEY_DELAY", "100")) / 1000.0
+AUTO_DELAY = int(os.getenv("AUTOCOMPLETE_TYPE_DELAY", "100")) / 1000.0
+UI_DELAY = int(os.getenv("UI_ANIMATION_DELAY", "500")) / 1000.0
+STEP_DELAY = int(os.getenv("ACTION_STEP_DELAY", "200")) / 1000.0
+
+# Viewport
+VIEWPORT_WIDTH = int(os.getenv("VIEWPORT_WIDTH", "1920"))
+VIEWPORT_HEIGHT = int(os.getenv("VIEWPORT_HEIGHT", "1080"))
+
+
 ## Removing global entry for user data dir to create a fresh one each time
 #USER_DATA_DIR = tempfile.mkdtemp(prefix="cdp-profile-", dir="C:\\Users\\PreetPragyan\\temp")
+
+#PROXIES
 HTTP_PROXY = os.getenv("HTTP_PROXY")
 HTTPS_PROXY = os.getenv("HTTPS_PROXY")
 PROXIES = {
@@ -95,7 +125,7 @@ class ChromeCDP:
         #Cleanup stale profiles
         self._clean_old_profiles()
         #Create a fresh user data dir for this session
-        self.user_data_dir = tempfile.mkdtemp(prefix="cdp-profile-", dir="C:\\Users\\PreetPragyan\\temp")
+        self.user_data_dir = tempfile.mkdtemp(prefix="cdp-profile-", dir=USER_DATA_DIR)
 
     def _capture_failure_artifacts(self, entry):
         if not SCREENSHOT_ON_FAIL:
@@ -142,7 +172,6 @@ class ChromeCDP:
             "--no-default-browser-check",
             #increae window size
             #"--start-maximized",
-            #"--window-size=1920,1080"
             "--disable-save-password-bubble",
             "--password-store=basic",
             "--use-mock-keychain",
@@ -187,9 +216,7 @@ class ChromeCDP:
 
         self._connect_ws()
         self._enable_domains()
-        self.force_viewport(1920, 1080)
-        if FULLSCREEN:
-            self._set_fullscreen()
+        self.force_viewport(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
 
     def _ensure_input_ready(self):
         if self.input_ready:
@@ -209,7 +236,7 @@ class ChromeCDP:
                 self.process.terminate()
 
             try:
-                self.process.wait(timeout=2)
+                self.process.wait(timeout=APP_CLOSE_TIMEOUT / 1000)
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 
@@ -219,7 +246,7 @@ class ChromeCDP:
         self.process = None
         
         # Wait a little for file locks to release
-        time.sleep(0.5)
+        time.sleep(UI_DELAY)
         try:
             shutil.rmtree(self.user_data_dir, ignore_errors=True)
             print(f"Cleaned up profile: {self.user_data_dir}")
@@ -242,7 +269,7 @@ class ChromeCDP:
             except Exception as e:
                 #pass
                 last_error = e
-            time.sleep(0.2)
+            time.sleep(STEP_DELAY)
         raise RuntimeError("CDP endpoint not available")
 
     def _connect_ws(self, attempts=5, delay=0.2):
@@ -439,7 +466,7 @@ class ChromeCDP:
 
     # --------------- Wait helpers ----------------
 
-    def wait_for_element(self, xpath, timeout_ms=5000):
+    def wait_for_element(self, xpath, timeout_ms=DEFAULT_TIMEOUT):
         self.wait_for_dom_stable(timeout_ms)
 
         deadline = time.monotonic() + timeout_ms / 1000
@@ -467,11 +494,11 @@ class ChromeCDP:
             msg_id = self._send("Runtime.evaluate", {"expression": expr})
             if self._recv(msg_id)["result"]["result"]["value"]:
                 return True
-            time.sleep(0.1)
+            time.sleep(STEP_DELAY)
 
         raise TimeoutError(f"Element not visible: {xpath}")
     
-    def wait_for_visible_element(self, xpath: str, timeout_ms: int = 5000):
+    def wait_for_visible_element(self, xpath: str, timeout_ms: int = DEFAULT_TIMEOUT):
         deadline = time.monotonic() + (timeout_ms / 1000)
 
         expr = f'''
@@ -497,11 +524,11 @@ class ChromeCDP:
             if visible:
                 return True
 
-            time.sleep(0.2)
+            time.sleep(STEP_DELAY)
 
         raise TimeoutError(f"Element not visible within {timeout_ms}ms: {xpath}")
 
-    def wait_for_dom_stable(self, timeout_ms=5000, idle_ms=300):
+    def wait_for_dom_stable(self, timeout_ms=DOM_TIMEOUT, idle_ms=DOM_IDLE_MS):
         """
         Wait until DOM mutations stop for idle_ms duration.
         """
@@ -533,7 +560,7 @@ class ChromeCDP:
                 
                 # Check for error in evaluation (e.g. context destroyed)
                 if "error" in result.get("result", {}):
-                    time.sleep(0.1)
+                    time.sleep(STEP_DELAY)
                     continue
                     
                 idle_time = result["result"]["result"]["value"]
@@ -544,11 +571,11 @@ class ChromeCDP:
                 # Ignore transient errors during page loads/navs
                 pass
 
-            time.sleep(0.1)
+            time.sleep(STEP_DELAY)
 
         raise TimeoutError("DOM did not stabilize")
 
-    def wait_for_network_idle(self, timeout_ms=5000, idle_ms=500):
+    def wait_for_network_idle(self, timeout_ms=NETWORK_TIMEOUT, idle_ms=NETWORK_IDLE_MS):
         """
         Wait until there are no pending network requests.
         """
@@ -564,10 +591,10 @@ class ChromeCDP:
                     return True
             else:
                 stable_since = None
-            time.sleep(0.05)
+            time.sleep(STEP_DELAY)
         raise TimeoutError("Network did not become idle")
 
-    def wait_for_text(self, text: str, timeout_ms: int = 10000):
+    def wait_for_text(self, text: str, timeout_ms: int = DEFAULT_TIMEOUT):
         """
         Wait until the given visible text appears anywhere in the document.
         """
@@ -604,7 +631,7 @@ class ChromeCDP:
             if result.get("value") is True:
                 return
 
-            time.sleep(0.1)
+            time.sleep(STEP_DELAY)
 
         raise TimeoutError(f"Text not found within {timeout_ms}ms: '{text}'")
 
@@ -691,7 +718,7 @@ class ChromeCDP:
             "objectId": object_id
         })
 
-    def hover(self, xpath, timeout_ms=10000):
+    def hover(self, xpath, timeout_ms=DEFAULT_TIMEOUT):
         self._ensure_page_actionable(timeout_ms=timeout_ms)
         self.wait_for_element(xpath, timeout_ms=timeout_ms)
         
@@ -711,13 +738,13 @@ class ChromeCDP:
         # 4. Perform the Physical Hover
         # "Jitter" to wake up event listeners
         self.mouse_move(point["x"] - 5, point["y"] - 5)
-        time.sleep(0.05)
+        time.sleep(STEP_DELAY)
         self.mouse_move(point["x"], point["y"])
         
         # 5. Synthetic Fallback (using the ID directly)
         self._dispatch_synthetic_hover_on_id(object_id)
         
-        time.sleep(0.5) # Allow hover effects to take hold
+        time.sleep(UI_DELAY) # Allow hover effects to take hold
 
     def mouse_move(self, x, y):
         self._send("Input.dispatchMouseEvent", {
@@ -727,7 +754,7 @@ class ChromeCDP:
             "buttons": 0
         })
 
-    def double_click(self, xpath, timeout_ms=10000):
+    def double_click(self, xpath, timeout_ms=DEFAULT_TIMEOUT):
         self._ensure_page_actionable(timeout_ms=timeout_ms)
         self.wait_for_element(xpath, timeout_ms=timeout_ms)
         
@@ -749,7 +776,7 @@ class ChromeCDP:
             "objectId": obj_id
         })
 
-    def drag_and_drop(self, source_xpath, target_xpath, timeout_ms=10000):
+    def drag_and_drop(self, source_xpath, target_xpath, timeout_ms=DEFAULT_TIMEOUT):
         self._ensure_page_actionable(timeout_ms=timeout_ms)
         self.wait_for_element(source_xpath, timeout_ms=timeout_ms)
         self.wait_for_element(target_xpath, timeout_ms=timeout_ms)
@@ -772,9 +799,9 @@ class ChromeCDP:
         if src and tgt:
             self.mouse_move(src["x"], src["y"])
             self.mouse_down(src["x"], src["y"])
-            time.sleep(0.2) # Small drag delay
+            time.sleep(STEP_DELAY) # Small drag delay
             self.mouse_move(tgt["x"], tgt["y"])
-            time.sleep(0.2)
+            time.sleep(STEP_DELAY)
             self.mouse_up(tgt["x"], tgt["y"])
             return
 
@@ -847,7 +874,7 @@ class ChromeCDP:
         msg_id = self._send("Runtime.evaluate", {"expression": expr})
         return self._recv(msg_id)["result"]["result"].get("value") is True
 
-    def fill(self, xpath: str, value: str, timeout_ms: int = 10000):
+    def fill(self, xpath: str, value: str, timeout_ms: int = DEFAULT_TIMEOUT):
 
         entry = None
         if self.tracer.enabled:
@@ -858,8 +885,8 @@ class ChromeCDP:
         try:            
             while time.monotonic() < deadline:
                 try:
-                    self._ensure_page_actionable(timeout_ms=3000)
-                    self.wait_for_element(xpath, timeout_ms=2000)
+                    self._ensure_page_actionable(timeout_ms=PAGE_LOAD_TIMEOUT)
+                    self.wait_for_element(xpath, timeout_ms=DEFAULT_TIMEOUT)
                     
                     # 1. Get Stable Reference
                     obj_id = self._get_object_id(xpath)
@@ -889,7 +916,7 @@ class ChromeCDP:
 
                 except Exception:
                     if entry: self.tracer.record_retry(entry)
-                    time.sleep(0.1)
+                    time.sleep(STEP_DELAY)
 
             raise TimeoutError(f"Fill timed out for xpath: {xpath}")
 
@@ -900,14 +927,14 @@ class ChromeCDP:
                 self.tracer.dump()
             raise
 
-    def click(self, xpath, timeout_ms=10000):
+    def click(self, xpath, timeout_ms=DEFAULT_TIMEOUT):
         entry = self.tracer.start_step(action="click", target=xpath) if self.tracer.enabled else None
         deadline = time.monotonic() + timeout_ms / 1000
         try:
             while time.monotonic() < deadline:
                 try:
-                    self._ensure_page_actionable(timeout_ms=3000)
-                    self.wait_for_element(xpath, timeout_ms=2000)
+                    self._ensure_page_actionable(timeout_ms=PAGE_LOAD_TIMEOUT)
+                    self.wait_for_element(xpath, timeout_ms=DEFAULT_TIMEOUT)
                     
                     # 1. Get Stable Reference (OBJECT ID)
                     # We do this BEFORE scrolling to avoid losing the element if the DOM shifts
@@ -946,7 +973,7 @@ class ChromeCDP:
 
                 except Exception:
                     if entry: self.tracer.record_retry(entry)
-                    time.sleep(0.1)
+                    time.sleep(STEP_DELAY)
 
             raise TimeoutError(f"Click failed: {xpath}")
         except Exception as e:
@@ -1005,7 +1032,7 @@ class ChromeCDP:
         msg_id = self._send("Runtime.evaluate", {"expression": expr})
         return self._recv(msg_id)["result"]["result"].get("value") is True
 
-    def _ensure_page_actionable(self, timeout_ms=15000):
+    def _ensure_page_actionable(self, timeout_ms=PAGE_LOAD_TIMEOUT):
         """
         Robustly waits for the page to be fully loaded and stable.
         Checks:
@@ -1024,20 +1051,20 @@ class ChromeCDP:
                 state = self._recv(ready_id)["result"]["result"].get("value")
 
                 if state != "complete":
-                    time.sleep(0.1)
+                    time.sleep(STEP_DELAY)
                     continue
 
                 # 2. Network Idle Check (SOFT CHECK)
                 # If network is busy (analytics/ads) try to wait, but if times out, proceed anyway
                 try:
-                    self.wait_for_network_idle(timeout_ms=2000, idle_ms=500)
+                    self.wait_for_network_idle(timeout_ms=NETWORK_TIMEOUT, idle_ms=500)
                 except TimeoutError:
                     pass 
 
                 # 3. DOM Stability Check (Crucial for Hydration/Animations)
                 # Waits for the HTML to stop shifting/growing for 500ms
                 try:
-                    self.wait_for_dom_stable(timeout_ms=2000, idle_ms=500)
+                    self.wait_for_dom_stable(timeout_ms=DOM_TIMEOUT, idle_ms=500)
                 except TimeoutError:
                     if time.monotonic() > deadline: raise
                     continue
@@ -1047,7 +1074,7 @@ class ChromeCDP:
 
             except Exception:
                 # Ignore transient errors (e.g., context destroyed during nav)
-                time.sleep(0.1)
+                time.sleep(STEP_DELAY)
 
         raise TimeoutError(f"Page failed to stabilize within {timeout_ms}ms")
 
@@ -1073,7 +1100,7 @@ class ChromeCDP:
                 "functionDeclaration": "function() { this.focus(); }",
                 "objectId": obj_id
             })
-            time.sleep(0.1) # Small delay for focus to register
+            time.sleep(STEP_DELAY) # Small delay for focus to register
 
         # 2. Parse Keys
         modifiers, key = self._parse_key_combo(keys)
@@ -1202,7 +1229,7 @@ class ChromeCDP:
                 "objectId": obj_id
             })
         
-        time.sleep(0.1)
+        time.sleep(STEP_DELAY)
 
         # 3. Clear using Ctrl+A and Backspace
         
@@ -1227,13 +1254,13 @@ class ChromeCDP:
             "type": "keyUp", "key": "Control", "code": "ControlLeft", "modifiers": 0
         })
 
-        time.sleep(0.05)
+        time.sleep(STEP_DELAY)
 
         # Press Backspace
         self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Backspace", "code": "Backspace"})
         self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Backspace", "code": "Backspace"})
 
-        time.sleep(0.1)
+        time.sleep(STEP_DELAY)
 
         # 4. Human like typeing
         print(f"Human typing into {xpath}...")
@@ -1241,7 +1268,10 @@ class ChromeCDP:
             self._send("Input.dispatchKeyEvent", {"type": "keyDown", "text": char, "key": char})
             self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
             self._send("Input.dispatchKeyEvent", {"type": "keyUp", "text": char, "key": char})
-            time.sleep(0.05 + (0.05 * (ord(char) % 3))) # Randomize delay slightly (50ms - 150ms)
+            #time.sleep(0.05 + (0.05 * (ord(char) % 3))) # Randomize delay slightly (50ms - 150ms)
+            # We add a little randomness (jitter) to the base delay
+            jitter = (ord(char) % 3) * 0.02 
+            time.sleep(HUMAN_DELAY + jitter)
 
     # ------------ Screenshot tools ------------
     def screenshot(self, full_page: bool = True):
@@ -1372,7 +1402,7 @@ class ChromeCDP:
         # Step 1: Open Dropdown
         print(f"Clicking dropdown trigger: {trigger_xpath}")
         self.click(trigger_xpath)
-        time.sleep(0.5) 
+        time.sleep(UI_DELAY) 
 
         # Step 2: Find Best Option using Scoring Logic
         expr = f"""
@@ -1445,7 +1475,7 @@ class ChromeCDP:
                 "objectId": option_id
             })
             
-        time.sleep(0.2)
+        time.sleep(STEP_DELAY)
 
     def select_autocomplete_option(self, input_xpath: str, select_text: str):
         """
@@ -1506,7 +1536,7 @@ class ChromeCDP:
             self._send("Input.dispatchKeyEvent", {"type": "keyUp", "text": char, "key": char})
             
             # B. Small delay for JS to react
-            time.sleep(0.1) 
+            time.sleep(AUTO_DELAY) 
 
             # C. Check if target appeared (Start checking after 2nd char to save resources)
             if i >= 1: 
@@ -1861,9 +1891,8 @@ class ChromeCDP:
         return self._recv(msg_id)["result"]["result"]["value"]
 
     # ---------------- Clean Up Tool ----------------
-    def _clean_old_profiles(self, max_age_seconds=300):
-        base_dir = r"C:\Users\PreetPragyan\temp" # Your specific temp path
-        pattern = os.path.join(base_dir, "cdp-profile-*")
+    def _clean_old_profiles(self, max_age_seconds=300):        
+        pattern = os.path.join(USER_DATA_DIR, "cdp-profile-*")
         
         now = time.time()
         

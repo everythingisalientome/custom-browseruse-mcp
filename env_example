@@ -1,0 +1,27 @@
+TRACE_ENABLED=true
+SCREENSHOT_ON_FAIL=true
+HTTP_PROXY="http://proxy.example.com:8080"
+HTTPS_PROXY="https://proxy.example.com:8080"
+
+
+# Chrome Configuration
+CHROME_DEBUG_PORT=9222
+VIEWPORT_WIDTH=1920
+VIEWPORT_HEIGHT=1080
+HEADLESS=0
+USER_DATA_DIR="C:\\Users\\Preet\\temp"
+
+# Timeouts (in milliseconds)
+DEFAULT_TIMEOUT=10000
+PAGE_LOAD_TIMEOUT=15000
+NETWORK_IDLE_TIMEOUT=2000
+DOM_STABLE_TIMEOUT=2000
+APP_CLOSE_TIMEOUT=2000
+
+# Delays (in milliseconds)
+NETWORK_IDLE_DURATION=500
+DOM_STABLE_DURATION=500
+HUMAN_KEY_DELAY=100         # Base delay for human typing
+AUTOCOMPLETE_TYPE_DELAY=100 # Delay between keys in autocomplete
+UI_ANIMATION_DELAY=500      # Wait for popups/menus to open (was 0.5s)
+ACTION_STEP_DELAY=200       # Small pause between complex actions (was 0.1s/0.2s)

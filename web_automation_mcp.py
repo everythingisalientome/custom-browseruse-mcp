@@ -1,6 +1,6 @@
 from mcp.server.fastmcp import FastMCP
 import json
-from cdp_client import ChromeCDP
+from cdp_client import ChromeCDP, DEFAULT_TIMEOUT
 import base64
 
 app = FastMCP("web-automation-mcp")
@@ -108,7 +108,7 @@ async def drag_and_drop(source_xpath: str, target_xpath: str):
 @app.tool()
 async def type_like_human(xpath: str, value: str):
     """
-    Types text slowly, character-by-character, simulating a real user.
+    Clears the field (Ctrl+A -> Delete) and then types text character-by-character..
     
     WHEN TO USE: 
     - Use this ONLY if the standard 'type_into' tool fails or has no effect.
@@ -163,7 +163,7 @@ async def get_interactive_elements(tag_name: str = "button"):
 
 # ---------------- Wait tools ----------------
 @app.tool()
-async def wait_for_element(xpath: str, timeout_ms: int = 10000):
+async def wait_for_element(xpath: str, timeout_ms: int = DEFAULT_TIMEOUT):
     try:
         cdp.wait_for_element(xpath, timeout_ms)
         return ok()
@@ -171,7 +171,7 @@ async def wait_for_element(xpath: str, timeout_ms: int = 10000):
         return err("TIMEOUT", str(e))
 
 @app.tool()
-async def wait_for_network_idle(timeout_ms: int = 10000):
+async def wait_for_network_idle(timeout_ms: int = DEFAULT_TIMEOUT):
     try:
         cdp.wait_for_network_idle(timeout_ms)
         return ok()
@@ -179,7 +179,7 @@ async def wait_for_network_idle(timeout_ms: int = 10000):
         return err("TIMEOUT", str(e))
     
 @app.tool()
-async def wait_for_text(text: str, timeout_ms: int = 10000):
+async def wait_for_text(text: str, timeout_ms: int = DEFAULT_TIMEOUT):
     try:
         cdp.wait_for_text(text, timeout_ms)
         return {"status": "OK"}
@@ -193,7 +193,7 @@ async def wait_for_text(text: str, timeout_ms: int = 10000):
 @app.tool()
 async def scroll_to_element(xpath: str):
     try:
-        if cdp._scroll_into_view(xpath):
+        if cdp.scroll_into_view(xpath):
             return {"status": "OK"}
         return {"status": "ERROR", "error_code": "NOT_FOUND"}
     except Exception as e:
