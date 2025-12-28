@@ -108,12 +108,12 @@ async def drag_and_drop(source_xpath: str, target_xpath: str):
 @app.tool()
 async def type_like_human(xpath: str, value: str):
     """
-    Clears the field (Ctrl+A -> Delete) and then types text character-by-character..
+    Types text character-by-character into the field.
     
-    WHEN TO USE: 
-    - Use this ONLY if the standard 'type_into' tool fails or has no effect.
-    - Use this for strict banking forms, search bars, or sites with bot protection 
-      that ignore instant text entry.
+    IMPORTANT:
+    - This tool DOES NOT clear the field first. It appends to existing text.
+    - Use this for "Type-ahead" fields, appending text, or when 'type_into' fails.
+    - If you need to clear the field first, use 'send_keys' with Ctrl+A -> Backspace.
     """
     try:
         cdp.type_human(xpath, value)

@@ -1149,7 +1149,7 @@ class ChromeCDP:
             "code": code_val,
             "modifiers": mod_mask,
             "windowsVirtualKeyCode": 0, 
-            "nativeVirtualKeyCode": 0
+            "nativeVirtualKeyCode":
         })
         
         self._send("Input.dispatchKeyEvent", {
@@ -1205,7 +1205,6 @@ class ChromeCDP:
         """
         Types text like a human:
         1. Focuses the element.
-        2. Physically selects all text (Ctrl+A) and deletes it (Backspace).
         3. Types the new text one char at a time with delays.
         """
         self._ensure_page_actionable()
@@ -1230,46 +1229,47 @@ class ChromeCDP:
             })
         
         time.sleep(STEP_DELAY)
-
-        # 3. Clear using Ctrl+A and Backspace
         
-        # Press Ctrl (Modifier 2)
-        self._send("Input.dispatchKeyEvent", {
-            "type": "keyDown", "key": "Control", "code": "ControlLeft", "modifiers": 2
-        })
+        ''' Commented out - so that I can send the events separately 
+        # # 3. Clear using Ctrl+A and Backspace
         
-        # Press A (with Ctrl mod)
-        self._send("Input.dispatchKeyEvent", {
-            "type": "keyDown", "key": "a", "code": "KeyA", "modifiers": 2
-        })
-        self._send("Input.dispatchKeyEvent", { # Char event is needed by some browsers
-            "type": "char", "text": "a" 
-        })
-        self._send("Input.dispatchKeyEvent", {
-            "type": "keyUp", "key": "a", "code": "KeyA", "modifiers": 2
-        })
+        # # Press Ctrl (Modifier 2)
+        # self._send("Input.dispatchKeyEvent", {
+        #     "type": "keyDown", "key": "Control", "code": "ControlLeft", "modifiers": 2
+        # })
         
-        # Release Ctrl
-        self._send("Input.dispatchKeyEvent", {
-            "type": "keyUp", "key": "Control", "code": "ControlLeft", "modifiers": 0
-        })
+        # # Press A (with Ctrl mod)
+        # self._send("Input.dispatchKeyEvent", {
+        #     "type": "keyDown", "key": "a", "code": "KeyA", "modifiers": 2
+        # })
+        # self._send("Input.dispatchKeyEvent", { # Char event is needed by some browsers
+        #     "type": "char", "text": "a" 
+        # })
+        # self._send("Input.dispatchKeyEvent", {
+        #     "type": "keyUp", "key": "a", "code": "KeyA", "modifiers": 2
+        # })
+        
+        # # Release Ctrl
+        # self._send("Input.dispatchKeyEvent", {
+        #     "type": "keyUp", "key": "Control", "code": "ControlLeft", "modifiers": 0
+        # })
 
-        time.sleep(STEP_DELAY)
+        # time.sleep(STEP_DELAY)
 
-        # Press Backspace
-        self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Backspace", "code": "Backspace"})
-        self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Backspace", "code": "Backspace"})
+        # # Press Backspace
+        # self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Backspace", "code": "Backspace"})
+        # self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Backspace", "code": "Backspace"})
 
-        time.sleep(STEP_DELAY)
+        # time.sleep(STEP_DELAY)
+        '''
 
         # 4. Human like typeing
         print(f"Human typing into {xpath}...")
         for char in text:
-            self._send("Input.dispatchKeyEvent", {"type": "keyDown", "text": char, "key": char})
+            self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": char})
             self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
-            self._send("Input.dispatchKeyEvent", {"type": "keyUp", "text": char, "key": char})
-            #time.sleep(0.05 + (0.05 * (ord(char) % 3))) # Randomize delay slightly (50ms - 150ms)
-            # We add a little randomness (jitter) to the base delay
+            self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
+            
             jitter = (ord(char) % 3) * 0.02 
             time.sleep(HUMAN_DELAY + jitter)
 
@@ -1531,9 +1531,9 @@ class ChromeCDP:
 
         for i, char in enumerate(select_text):
             # A. Type the character
-            self._send("Input.dispatchKeyEvent", {"type": "keyDown", "text": char, "key": char})
+            self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": char})
             self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
-            self._send("Input.dispatchKeyEvent", {"type": "keyUp", "text": char, "key": char})
+            self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
             
             # B. Small delay for JS to react
             time.sleep(AUTO_DELAY) 
