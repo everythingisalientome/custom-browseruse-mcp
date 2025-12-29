@@ -1308,29 +1308,55 @@ class ChromeCDP:
     # ---------------- Data Extraction Tools ----------------
     def get_text(self, xpath: str) -> str:
         """
-        Retrieves text from ANY element. 
-        Smartly handles Inputs (value), Selects (selected text), and Nodes (innerText).
+        Retrieves text from ANY element.
+        - Inputs/Textareas: Returns 'value' (or 'placeholder' if empty).
+        - Selects: Returns the visible text of the selected option.
+        - Buttons: Handles both <button>Text</button> and <input type="button" value="Text">.
+        - Standard Tags (div, span, td, p, h1, li, etc): Returns innerText.
         """
         self._ensure_page_actionable()
 
-        # 1. Get Stable Reference
         obj_id = self._get_object_id(xpath)
         if not obj_id:
             raise RuntimeError(f"Element not found for text retrieval: {xpath}")
 
-        # 2. Extract Text via JS
         expr = """
         function() {
             const el = this;
             const tag = el.tagName.toLowerCase();
+            const inputTypes = ['text', 'password', 'email', 'number', 'search', 'url', 'tel', 'date'];
             
-            if (tag === 'input' || tag === 'textarea') {
-                return el.value || '';
-            } else if (tag === 'select') {
-                return el.options[el.selectedIndex].text || '';
-            } else {
-                return el.innerText || el.textContent || '';
+            // 1. Form Fields (Input, Textarea)
+            if (tag === 'textarea' || (tag === 'input' && inputTypes.includes(el.type))) {
+                return el.value || el.getAttribute('placeholder') || '';
             }
+            
+            // 2. Buttons (Submit, Reset, Button)
+            // <input type="button" value="Save"> vs <button>Save</button>
+            if (tag === 'input' && ['button', 'submit', 'reset'].includes(el.type)) {
+                return el.value || '';
+            }
+            
+            // 3. Dropdowns
+            if (tag === 'select') {
+                return el.options[el.selectedIndex].text || '';
+            }
+
+            // 4. Wrapper Logic (e.g., <td><input value="123"></td>)
+            // If this element wraps a form field and has no text of its own, grab the child's value.
+            const childInput = el.querySelector('input, textarea, select');
+            if (childInput) {
+                const directText = el.innerText.replace(childInput.value || '', '').trim();
+                if (directText.length === 0) {
+                     if (childInput.tagName.toLowerCase() === 'select') {
+                        return childInput.options[childInput.selectedIndex].text || '';
+                     }
+                     return childInput.value || childInput.getAttribute('placeholder') || '';
+                }
+            }
+
+            // 5. Universal Fallback (h1, p, div, span, li, a, label, th, td...)
+            return el.innerText || el.textContent || '';
         }
         """
         result = self._send("Runtime.callFunctionOn", {
@@ -1338,7 +1364,14 @@ class ChromeCDP:
             "functionDeclaration": expr,
             "returnByValue": True
         })
-        return str(result["result"]["result"]["value"]).strip()
+        
+        # Safety for null/undefined results
+        res_root = result.get("result", {})
+        inner_res = res_root.get("result", {})
+        val = inner_res.get("value", "")
+        
+        return str(val).strip()
+    
 
     def scrape_table(
         self, 
