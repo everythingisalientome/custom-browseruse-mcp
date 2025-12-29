@@ -12,9 +12,9 @@ BIKE_LIGHT_XPATH= "/html/body/div/div/div/div[2]/div/div/div/div[2]/div[2]/div[2
 RED_TSHIRT_XPATH = "/html/body/div/div/div/div[2]/div/div/div/div[6]/div[2]/div[2]/button"
 VIEW_CART_XPATH = "/html/body/div/div/div/div[1]/div[1]/div[3]/a"
 CHECKOUT_XPATH = "/html/body/div/div/div/div[2]/div/div[2]/button[2]"
-FIRSTNAME_XPATH = "/html/body/div/div/div/div[2]/div/form/div[1]/div[1]/input"
-LASTNAME_XPATH = "/html/body/div/div/div/div[2]/div/form/div[1]/div[2]/input"
-POSTALCODE_XPATH = "/html/body/div/div/div/div[2]/div/form/div[1]/div[3]/input"
+FIRSTNAME_XPATH = "//*[@id='first-name']"
+LASTNAME_XPATH = "//*[@id='last-name']"
+POSTALCODE_XPATH = "//*[@id='postal-code']"
 CONTINUE_XPATH = "/html/body/div/div/div/div[2]/div/form/div[2]/input"
 FINISH_XPATH = "/html/body/div/div/div/div[2]/div/div[2]/div[9]/button[2]"
 
@@ -60,8 +60,8 @@ print("Filling in Checkout details...")
 cdp.fill(FIRSTNAME_XPATH, "John")
 cdp.fill(LASTNAME_XPATH, "Doe")
 cdp.fill(POSTALCODE_XPATH, "12345")
-cdp.click(CONTINUE_XPATH)
+#cdp.click(CONTINUE_XPATH)
 
 print("Finishing Checkout...")
-cdp.scroll_into_view(FINISH_XPATH)
-cdp.click(FINISH_XPATH)
+#cdp.scroll_into_view(FINISH_XPATH)
+#cdp.click(FINISH_XPATH)

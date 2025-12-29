@@ -896,20 +896,78 @@ class ChromeCDP:
                     self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
 
                     # 3. Focus (Using Runtime.callFunctionOn)
-                    self._send("Runtime.callFunctionOn", {
-                        "functionDeclaration": "function() { this.focus(); }",
-                        "objectId": obj_id
-                    })
+                    # self._send("Runtime.callFunctionOn", {
+                    #     "functionDeclaration": "function() { this.focus(); }",
+                    #     "objectId": obj_id
+                    # })
+
+                    # 3. Focus (Physical click ensures events fire)
+                    point = self._get_center_by_id(obj_id)
+                    if point:
+                        self.mouse_move(point["x"], point["y"])
+                        self.mouse_down(point["x"], point["y"])
+                        self.mouse_up(point["x"], point["y"])
+                    else:
+                        self._send("Runtime.callFunctionOn", {
+                            "functionDeclaration": "function() { this.focus(); }",
+                            "objectId": obj_id
+                        })
+
+                    # WAIT for focus to settle
+                    time.sleep(STEP_DELAY)
 
                     # 4. Clear (Using Runtime.callFunctionOn)
-                    self._send("Runtime.callFunctionOn", {
-                        "functionDeclaration": "function() { this.value = ''; this.dispatchEvent(new Event('input', {bubbles:true})); }",
-                        "objectId": obj_id
+                    # self._send("Runtime.callFunctionOn", {
+                    #     "functionDeclaration": "function() { this.value = ''; this.dispatchEvent(new Event('input', {bubbles:true})); }",
+                    #     "objectId": obj_id
+                    # })
+
+                    # 4. Physical Clear (Ctrl+A -> Backspace)
+                    # We use this instead of JS to ensure React/Angular state updates
+                    
+                    # Press Ctrl
+                    self._send("Input.dispatchKeyEvent", {
+                        "type": "keyDown", 
+                        "key": "Control", 
+                        "code": "ControlLeft", 
+                        "modifiers": 2 
                     })
+                    
+                    # Press A
+                    self._send("Input.dispatchKeyEvent", {
+                        "type": "keyDown", 
+                        "key": "a", 
+                        "code": "KeyA", 
+                        "modifiers": 2, # 2 = Ctrl
+                        "text": "",     # Explicitly say no text
+                        "unmodifiedText": ""
+                    })
+                    
+                    self._send("Input.dispatchKeyEvent", {
+                        "type": "keyUp", 
+                        "key": "a", 
+                        "code": "KeyA", 
+                        "modifiers": 2
+                    })
+                    
+                    # Release Ctrl
+                    self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Control", "code": "ControlLeft", "modifiers": 0})
+                    
+                    time.sleep(0.05) # Pause between Select and Delete
+
+                    # Press Backspace
+                    self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Backspace", "code": "Backspace"})
+                    self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Backspace", "code": "Backspace"})
+
+                    # --- CRITICAL FIX: PAUSE HERE ---
+                    # Wait for the "Field Required" validation to fire and settle
+                    time.sleep(STEP_DELAY)
 
                     # 5. Type (Keystrokes go to focused element)
                     for ch in value:
                         self._send("Input.dispatchKeyEvent", { "type": "char", "text": ch })
+                        # Optional: Tiny delay for stability
+                        # time.sleep(0.01)
 
                     if entry: self.tracer.success(entry)
                     return
