@@ -44,6 +44,7 @@ def find_chrome_executable():
         "Install Chrome or update find_chrome_executable()."
     )
 
+#will use this function to find a free port on localhost
 def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("localhost", 0))
@@ -53,7 +54,10 @@ def find_free_port():
 TRACE_ENABLED = os.getenv("WEB_MCP_TRACE", "0") == "1"
 SCREENSHOT_ON_FAIL = os.getenv("WEB_MCP_SCREENSHOT_ON_FAIL", "0") == "1"
 
+
 # --- CONFIGURATION CONSTANTS ---
+
+# Connection
 CHROME_PATH = find_chrome_executable()
 DEBUG_PORT = int(os.getenv("CHROME_DEBUG_PORT", "9222"))
 USER_DATA_DIR = os.getenv("USER_DATA_DIR")
@@ -78,6 +82,11 @@ STEP_DELAY = int(os.getenv("ACTION_STEP_DELAY", "200")) / 1000.0
 # Viewport
 VIEWPORT_WIDTH = int(os.getenv("VIEWPORT_WIDTH", "1920"))
 VIEWPORT_HEIGHT = int(os.getenv("VIEWPORT_HEIGHT", "1080"))
+
+
+## Removing global entry for user data dir to create a fresh one each time
+#USER_DATA_DIR = tempfile.mkdtemp(prefix="cdp-profile-", dir="C:\\Users\\PreetPragyan\\temp")
+
 #PROXIES
 HTTP_PROXY = os.getenv("HTTP_PROXY")
 HTTPS_PROXY = os.getenv("HTTPS_PROXY")
@@ -103,6 +112,8 @@ KEY_MAP = {
     "PageDown": ("PageDown", "PageDown"),
 }
 
+
+
 class ChromeCDP:
     def __init__(self):
         self.process = None
@@ -112,44 +123,30 @@ class ChromeCDP:
         self._inflight_requests = 0 #rack in-flight requests
         self.tracer = TraceManager(enabled=TRACE_ENABLED)
         self.input_ready = False # To track if Input domain is enabled
-        self._clean_old_profiles() #Cleanup stale profiles
-        self.user_data_dir = tempfile.mkdtemp(prefix="cdp-profile-", dir=USER_DATA_DIR)#Create a fresh user data dir for this session
-
-    def _save_debug_screenshot(self, prefix="error"):
-        """
-        Universal helper to save a screenshot on any failure.
-        Saves to traces/error_{prefix}_{timestamp}.png
-        """
-        if not SCREENSHOT_ON_FAIL:
-            return
-
-        try:
-            timestamp = int(time.time())
-            filename = f"traces/error_{prefix}_{timestamp}.png"
-            os.makedirs("traces", exist_ok=True)
-            
-            img_data = self.screenshot(full_page=True)
-            with open(filename, "wb") as f:
-                f.write(img_data)
-            print(f"📸 Captured error screenshot: {filename}")
-        except Exception as e:
-            print(f"Failed to capture error screenshot: {e}")
+        #Cleanup stale profiles
+        self._clean_old_profiles()
+        #Create a fresh user data dir for this session
+        self.user_data_dir = tempfile.mkdtemp(prefix="cdp-profile-", dir=USER_DATA_DIR)
 
     def _capture_failure_artifacts(self, entry):
         if not SCREENSHOT_ON_FAIL:
             return  # hard stop
 
         ts = entry["step"]
+
+        # Screenshot
         try:
-            img = self.screenshot(full_page=True) # Screenshot
+            img = self.screenshot(full_page=True)
             shot_path = f"traces/step_{ts}.png"
             with open(shot_path, "wb") as f:
                 f.write(img)
             self.tracer.attach_artifact(entry, "screenshot", shot_path)
         except Exception:
             pass
+
+        # DOM snapshot
         try:
-            html = self.get_html() #DOM_Snapshot
+            html = self.get_html()
             dom_path = f"traces/step_{ts}.html"
             with open(dom_path, "w", encoding="utf-8") as f:
                 f.write(html)
@@ -238,10 +235,12 @@ class ChromeCDP:
                 os.kill(self.process.pid, signal.CTRL_BREAK_EVENT)
             else:
                 self.process.terminate()
+
             try:
                 self.process.wait(timeout=APP_CLOSE_TIMEOUT / 1000)
             except subprocess.TimeoutExpired:
-                self.process.kill()                
+                self.process.kill()
+                
         except Exception:
             pass
         
@@ -331,6 +330,10 @@ class ChromeCDP:
                     self._inflight_requests = max(0, self._inflight_requests - 1)
 
     def _recv(self, msg_id, timeout=None):
+        # while True:
+        #     msg = json.loads(self.ws.recv())
+        #     if msg.get("id") == msg_id:
+        #         return msg
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             if deadline and time.monotonic() > deadline:
@@ -389,6 +392,25 @@ class ChromeCDP:
 
         return modifiers, key_part
 
+    def _set_fullscreen(self):
+        """
+        Maximize browser window using CDP.
+        """
+        try:
+            # Get window ID
+            msg_id = self._send("Browser.getWindowForTarget")
+            result = self._recv(msg_id)["result"]
+            window_id = result["windowId"]
+
+            # Set window bounds to fullscreen
+            self._send("Browser.setWindowBounds", {
+                "windowId": window_id,
+                "bounds": {"windowState": "fullscreen"}
+            })
+        except Exception:
+            # Do NOT fail automation if fullscreen fails
+            pass
+
     #Force a viewport
     def force_viewport(self, width=1920, height=1080):
             """
@@ -425,6 +447,24 @@ class ChromeCDP:
         )
         return self._recv(msg_id)["result"]["result"]["value"]
 
+    # ---------------- Element helpers ----------------
+    def element_exists(self, xpath: str) -> bool:
+        expr = f'''
+        document.evaluate("{xpath}", document, null,
+        XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
+        '''
+        msg_id = self._send("Runtime.evaluate", {"expression": expr})
+        return self._recv(msg_id)["result"]["result"]["value"] is not None
+
+    def type(self, xpath: str, value: str):
+        self.click(xpath)
+        for ch in value:
+            self._send("Input.dispatchKeyEvent", {
+                "type": "char",
+                "text": ch
+            })
+
+
     # --------------- Wait helpers ----------------
     def wait_for_element(self, xpath, timeout_ms=DEFAULT_TIMEOUT):
         self.wait_for_dom_stable(timeout_ms)
@@ -456,7 +496,6 @@ class ChromeCDP:
                 return True
             time.sleep(STEP_DELAY)
 
-        self._save_debug_screenshot("wait_for_element_failed")
         raise TimeoutError(f"Element not visible: {xpath}")
     
     def wait_for_visible_element(self, xpath: str, timeout_ms: int = DEFAULT_TIMEOUT):
@@ -487,7 +526,6 @@ class ChromeCDP:
 
             time.sleep(STEP_DELAY)
 
-        self._save_debug_screenshot("wait_for_visible_element_failed")
         raise TimeoutError(f"Element not visible within {timeout_ms}ms: {xpath}")
 
     def wait_for_dom_stable(self, timeout_ms=DOM_TIMEOUT, idle_ms=DOM_IDLE_MS):
@@ -535,7 +573,6 @@ class ChromeCDP:
 
             time.sleep(STEP_DELAY)
 
-        self._save_debug_screenshot("wait_for_dom_stable_failed")
         raise TimeoutError("DOM did not stabilize")
 
     def wait_for_network_idle(self, timeout_ms=NETWORK_TIMEOUT, idle_ms=NETWORK_IDLE_MS):
@@ -596,7 +633,6 @@ class ChromeCDP:
 
             time.sleep(STEP_DELAY)
 
-        self._save_debug_screenshot("wait_for_text_failed")
         raise TimeoutError(f"Text not found within {timeout_ms}ms: '{text}'")
 
 
@@ -697,7 +733,6 @@ class ChromeCDP:
         # 3. Get Center using the Box Model of the ID (No XPath re-eval)
         point = self._get_center_by_id(object_id)
         if not point:
-             self._save_debug_screenshot("hover_failed")
              raise RuntimeError(f"Could not calculate geometry for: {xpath}")
 
         # 4. Perform the Physical Hover
@@ -770,8 +805,49 @@ class ChromeCDP:
             self.mouse_up(tgt["x"], tgt["y"])
             return
 
-        self._save_debug_screenshot("drag_and_drop_failed")
         raise RuntimeError("Drag failed: could not calculate geometry from IDs")
+
+    def _get_element_center(self, xpath):
+        # STRATEGY 1: JavaScript getBoundingClientRect (Fastest)
+        expr = f"""
+        (function () {{
+            try {{
+                const snapshot = document.evaluate("{xpath}", document, null,
+                    XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+                
+                let el = null;
+                for (let i = 0; i < snapshot.snapshotLength; i++) {{
+                    const item = snapshot.snapshotItem(i);
+                    const rect = item.getBoundingClientRect();
+                    const style = window.getComputedStyle(item);
+                    
+                    if (rect.width > 0 && rect.height > 0 && 
+                        style.visibility !== 'hidden' && style.display !== 'none') {{
+                        el = item;
+                        break;
+                    }}
+                }}
+
+                if (!el) return null;
+
+                const r = el.getBoundingClientRect();
+                return {{ x: r.left + r.width / 2, y: r.top + r.height / 2 }};
+            }} catch (e) {{
+                return null;
+            }}
+        }})()
+        """
+        msg_id = self._send("Runtime.evaluate", {"expression": expr})
+        result = self._recv(msg_id)["result"]["result"]
+        point = result.get("value")
+        
+        if point and "x" in point and "y" in point:
+            return point
+
+        # STRATEGY 2: CDP Box Model (Fallback)
+        # Use this if JS fails or returns null (e.g., complex overlays)
+        print(f"DEBUG: JS center failed for {xpath}, trying Box Model...")
+        return self._get_center_via_box_model(xpath)
 
     def press_key(self, key):
         self._send("Input.dispatchKeyEvent", {
@@ -817,7 +893,13 @@ class ChromeCDP:
                     if not obj_id: raise RuntimeError("Object ID lookup failed")
 
                     # 2. Scroll
-                    self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})                    
+                    self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+
+                    # 3. Focus (Using Runtime.callFunctionOn)
+                    # self._send("Runtime.callFunctionOn", {
+                    #     "functionDeclaration": "function() { this.focus(); }",
+                    #     "objectId": obj_id
+                    # })
 
                     # 3. Focus (Physical click ensures events fire)
                     point = self._get_center_by_id(obj_id)
@@ -834,6 +916,15 @@ class ChromeCDP:
                     # WAIT for focus to settle
                     time.sleep(STEP_DELAY)
 
+                    # 4. Clear (Using Runtime.callFunctionOn)
+                    # self._send("Runtime.callFunctionOn", {
+                    #     "functionDeclaration": "function() { this.value = ''; this.dispatchEvent(new Event('input', {bubbles:true})); }",
+                    #     "objectId": obj_id
+                    # })
+
+                    # 4. Physical Clear (Ctrl+A -> Backspace)
+                    # We use this instead of JS to ensure React/Angular state updates
+                    
                     # Press Ctrl
                     self._send("Input.dispatchKeyEvent", {
                         "type": "keyDown", 
@@ -885,7 +976,6 @@ class ChromeCDP:
                     if entry: self.tracer.record_retry(entry)
                     time.sleep(STEP_DELAY)
 
-            self._save_debug_screenshot("fill_failed")
             raise TimeoutError(f"Fill timed out for xpath: {xpath}")
 
         except Exception as e:
@@ -893,8 +983,6 @@ class ChromeCDP:
                 self.tracer.failure(entry, e)
                 self._capture_failure_artifacts(entry)
                 self.tracer.dump()
-            else:
-                self._save_debug_screenshot("fill_failed")
             raise
 
     def click(self, xpath, timeout_ms=DEFAULT_TIMEOUT):
@@ -945,16 +1033,62 @@ class ChromeCDP:
                     if entry: self.tracer.record_retry(entry)
                     time.sleep(STEP_DELAY)
 
-            self._save_debug_screenshot("click_failed")
             raise TimeoutError(f"Click failed: {xpath}")
         except Exception as e:
             if entry:
                 self.tracer.failure(entry, e)
                 self._capture_failure_artifacts(entry)
                 self.tracer.dump()
-            else:
-                self._save_debug_screenshot("click_failed")
             raise
+
+    def _focus_element(self, xpath):
+        expr = f"""
+        (function () {{
+            const snapshot = document.evaluate("{xpath}", document, null,
+                XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+                
+            let el = null;
+            for (let i = 0; i < snapshot.snapshotLength; i++) {{
+                const item = snapshot.snapshotItem(i);
+                const rect = item.getBoundingClientRect();
+                const style = window.getComputedStyle(item);
+                
+                if (rect.width > 0 && style.display !== 'none' && style.visibility !== 'hidden') {{
+                    el = item;
+                    break;
+                }}
+            }}
+            
+            if (!el) return false;
+            
+            el.scrollIntoView({{block: 'center', inline: 'center'}});
+            el.focus();
+            return document.activeElement === el;
+        }})()
+        """
+        msg_id = self._send("Runtime.evaluate", {"expression": expr})
+        result = self._recv(msg_id)["result"]["result"]
+        return result.get("value") is True
+    
+    def _is_editable(self, xpath):
+        expr = f"""
+        (function () {{
+            const snapshot = document.evaluate("{xpath}", document, null,
+                XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+            
+            for (let i = 0; i < snapshot.snapshotLength; i++) {{
+                const el = snapshot.snapshotItem(i);
+                const style = window.getComputedStyle(el);
+                
+                if (style.display !== 'none' && style.visibility !== 'hidden') {{
+                    return !el.disabled && !el.readOnly;
+                }}
+            }}
+            return false;
+        }})()
+        """
+        msg_id = self._send("Runtime.evaluate", {"expression": expr})
+        return self._recv(msg_id)["result"]["result"].get("value") is True
 
     def _ensure_page_actionable(self, timeout_ms=PAGE_LOAD_TIMEOUT):
         """
@@ -1110,6 +1244,21 @@ class ChromeCDP:
         result = self._recv(msg_id)["result"]["result"]
         return result.get("value") is True
 
+    def _js_click(self, xpath):
+        expr = f"""
+        (function () {{
+        const el = document.evaluate("{xpath}", document, null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+        if (!el) return false;
+        el.scrollIntoView({{block: 'center', inline: 'center'}});
+        el.click();
+        return true;
+        }})()
+        """
+        msg_id = self._send("Runtime.evaluate", {"expression": expr})
+        result = self._recv(msg_id)["result"]["result"]
+        return result.get("value") is True
+
     def type_human(self, xpath: str, text: str):
         """
         Types text like a human (Appends to existing text).
@@ -1117,48 +1266,44 @@ class ChromeCDP:
         2. Types one char at a time with delays.
         Does NOT clear the field first.
         """
-        try:
-            self._ensure_page_actionable()
+        self._ensure_page_actionable()
 
-            # 1. Get ID & Scroll
-            obj_id = self._get_object_id(xpath)
-            if not obj_id:
-                raise RuntimeError(f"Element not found: {xpath}")
+        # 1. Get ID & Scroll
+        obj_id = self._get_object_id(xpath)
+        if not obj_id:
+             raise RuntimeError(f"Element not found: {xpath}")
 
-            self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
-            
-            # 2. Focus to field
-            # We use a physical click to ensure the browser strictly focuses it
-            point = self._get_center_by_id(obj_id)
-            if point:
-                self.mouse_move(point["x"], point["y"])
-                self.mouse_down(point["x"], point["y"])
-                self.mouse_up(point["x"], point["y"])
-            else:
-                self._send("Runtime.callFunctionOn", {
-                    "functionDeclaration": "function() { this.focus(); }",
-                    "objectId": obj_id
-                })
-            
-            time.sleep(STEP_DELAY)
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+        
+        # 2. Focus to field
+        # We use a physical click to ensure the browser strictly focuses it
+        point = self._get_center_by_id(obj_id)
+        if point:
+            self.mouse_move(point["x"], point["y"])
+            self.mouse_down(point["x"], point["y"])
+            self.mouse_up(point["x"], point["y"])
+        else:
+            self._send("Runtime.callFunctionOn", {
+                "functionDeclaration": "function() { this.focus(); }",
+                "objectId": obj_id
+            })
+        
+        time.sleep(STEP_DELAY)
 
-            # 3. Human like typing (Loop)
-            # REMOVED: The Ctrl+A + Backspace block is gone.
+        # 3. Human like typing (Loop)
+        # REMOVED: The Ctrl+A + Backspace block is gone.
+        
+        print(f"Human typing into {xpath}...")
+        for char in text:
+            # FIX: Send 'key' only for Up/Down, 'text' only for Char event
+            self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": char})
+            self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
+            self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
             
-            print(f"Human typing into {xpath}...")
-            for char in text:
-                # FIX: Send 'key' only for Up/Down, 'text' only for Char event
-                self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": char})
-                self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
-                self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
-                
-                # Jitter the delay to look natural
-                jitter = (ord(char) % 3) * 0.02 
+            # Jitter the delay to look natural
+            jitter = (ord(char) % 3) * 0.02 
             time.sleep(HUMAN_DELAY + jitter)
 
-        except Exception as e:
-            self._save_debug_screenshot("type_human_failed")
-            raise e
 
     # ---------------- Data Extraction Tools ----------------
     def get_text(self, xpath: str) -> str:
@@ -1225,7 +1370,8 @@ class ChromeCDP:
         # Safety for null/undefined results
         res_root = result.get("result", {})
         inner_res = res_root.get("result", {})
-        val = inner_res.get("value", "")        
+        val = inner_res.get("value", "")
+        
         return str(val).strip()
     
 
@@ -1396,7 +1542,6 @@ class ChromeCDP:
                 
             except Exception as e:
                 print(f"Pagination failed: {e}")
-                self._save_debug_screenshot("pagination_click_failed")
                 break
                 
         return all_data
@@ -1476,143 +1621,135 @@ class ChromeCDP:
         label: str | None = None,
         index: int | None = None
     ):
-        try:
-            self._ensure_page_actionable()
+        self._ensure_page_actionable()
 
-            # 1. Get Stable Reference (Visible <select>)
-            obj_id = self._get_object_id(select_xpath)
-            if not obj_id:
-                raise RuntimeError(f"Select element not found or hidden: {select_xpath}")
+        # 1. Get Stable Reference (Visible <select>)
+        obj_id = self._get_object_id(select_xpath)
+        if not obj_id:
+            raise RuntimeError(f"Select element not found or hidden: {select_xpath}")
 
-            # 2. Scroll into view (Ensures visibility for event bubbling)
-            self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+        # 2. Scroll into view (Ensures visibility for event bubbling)
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
 
-            # 3. Execute Selection Logic on the ID
-            expr = f"""
-            function() {{
-                const select = this;
-                let option = null;
-                
-                if ({json.dumps(value)} !== null) {{
-                    option = [...select.options].find(o => o.value === {json.dumps(value)});
-                }} else if ({json.dumps(label)} !== null) {{
-                    option = [...select.options].find(o => o.text.trim() === {json.dumps(label)});
-                }} else if ({index} !== null) {{
-                    option = select.options[{index}];
-                }}
-
-                if (!option) return false;
-
-                select.value = option.value;
-                option.selected = true;
-
-                select.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                select.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                return true;
-            }}
-            """
-
-            msg_id = self._send("Runtime.callFunctionOn", {
-                "objectId": obj_id,
-                "functionDeclaration": expr,
-                "returnByValue": True
-            })
+        # 3. Execute Selection Logic on the ID
+        expr = f"""
+        function() {{
+            const select = this;
+            let option = null;
             
-            result = self._recv(msg_id)["result"]["result"]
-            if result.get("value") is not True:
-                raise RuntimeError(f"Option not found (Value: {value}, Label: {label}, Index: {index})")
-        except Exception as e:
-            self._save_debug_screenshot("select_option_failed")
-            raise e
+            if ({json.dumps(value)} !== null) {{
+                option = [...select.options].find(o => o.value === {json.dumps(value)});
+            }} else if ({json.dumps(label)} !== null) {{
+                option = [...select.options].find(o => o.text.trim() === {json.dumps(label)});
+            }} else if ({index} !== null) {{
+                option = select.options[{index}];
+            }}
+
+            if (!option) return false;
+
+            select.value = option.value;
+            option.selected = true;
+
+            select.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            select.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            return true;
+        }}
+        """
+
+        msg_id = self._send("Runtime.callFunctionOn", {
+            "objectId": obj_id,
+            "functionDeclaration": expr,
+            "returnByValue": True
+        })
+        
+        result = self._recv(msg_id)["result"]["result"]
+        if result.get("value") is not True:
+            raise RuntimeError(f"Option not found (Value: {value}, Label: {label}, Index: {index})")
 
     def select_custom_option(self, trigger_xpath: str, option_text: str):
         """
         Selects an item from a modern dropdown using a 'Best Match' scoring system.
         Prioritizes Exact Matches and Semantic Tags (li, role=option) over generic text.
         """
-        try:
-            self._ensure_page_actionable()
+        self._ensure_page_actionable()
 
-            # Step 1: Open Dropdown
-            print(f"Clicking dropdown trigger: {trigger_xpath}")
-            self.click(trigger_xpath)
-            time.sleep(UI_DELAY) 
+        # Step 1: Open Dropdown
+        print(f"Clicking dropdown trigger: {trigger_xpath}")
+        self.click(trigger_xpath)
+        time.sleep(UI_DELAY) 
 
-            # Step 2: Find Best Option using Scoring Logic
-            expr = f"""
-            (function() {{
-                const query = {json.dumps(option_text)}.toLowerCase();
-                const candidates = document.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
+        # Step 2: Find Best Option using Scoring Logic
+        expr = f"""
+        (function() {{
+            const query = {json.dumps(option_text)}.toLowerCase();
+            const candidates = document.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
+            
+            let bestEl = null;
+            let bestScore = -1;
+            
+            for (const el of candidates) {{
+                // 1. Strict Visibility Check
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                if (rect.width < 5 || rect.height < 5 || 
+                    style.visibility === 'hidden' || style.display === 'none' || 
+                    style.opacity === '0') continue;
                 
-                let bestEl = null;
-                let bestScore = -1;
+                const text = el.innerText.toLowerCase().trim();
+                if (!text.includes(query)) continue;
                 
-                for (const el of candidates) {{
-                    // 1. Strict Visibility Check
-                    const rect = el.getBoundingClientRect();
-                    const style = window.getComputedStyle(el);
-                    if (rect.width < 5 || rect.height < 5 || 
-                        style.visibility === 'hidden' || style.display === 'none' || 
-                        style.opacity === '0') continue;
-                    
-                    const text = el.innerText.toLowerCase().trim();
-                    if (!text.includes(query)) continue;
-                    
-                    // --- SCORING SYSTEM ---
-                    let score = 0;
-                    
-                    // Rule A: Exact Match is King (Score: +100)
-                    if (text === query) score += 100;
-                    
-                    // Rule B: Semantic Tags are Queen (Score: +50)
-                    // Prefer actual list items over generic divs
-                    if (el.tagName === 'LI' || el.getAttribute('role') === 'option') score += 50;
-                    
-                    // Rule C: Penalize "Wrapper" Containers (Score: -1000)
-                    // If a div contains the text but also 50 other characters, it's likely a parent, not the button.
-                    if (text.length > query.length + 50) score -= 1000;
-                    
-                    // Update Best Candidate
-                    if (score > bestScore) {{
-                        bestScore = score;
-                        bestEl = el;
-                    }}
+                // --- SCORING SYSTEM ---
+                let score = 0;
+                
+                // Rule A: Exact Match is King (Score: +100)
+                if (text === query) score += 100;
+                
+                // Rule B: Semantic Tags are Queen (Score: +50)
+                // Prefer actual list items over generic divs
+                if (el.tagName === 'LI' || el.getAttribute('role') === 'option') score += 50;
+                
+                // Rule C: Penalize "Wrapper" Containers (Score: -1000)
+                // If a div contains the text but also 50 other characters, it's likely a parent, not the button.
+                if (text.length > query.length + 50) score -= 1000;
+                
+                // Update Best Candidate
+                if (score > bestScore) {{
+                    bestScore = score;
+                    bestEl = el;
                 }}
-                return bestEl;
-            }})()
-            """
+            }}
+            return bestEl;
+        }})()
+        """
 
-            # 3. Get ID
-            msg_id = self._send("Runtime.evaluate", {
-                "expression": expr, 
-                "returnByValue": False 
+        # 3. Get ID
+        msg_id = self._send("Runtime.evaluate", {
+            "expression": expr, 
+            "returnByValue": False 
+        })
+        result = self._recv(msg_id)
+        remote_obj = result["result"]["result"]
+        
+        if remote_obj.get("subtype") == "null" or "objectId" not in remote_obj:
+            raise RuntimeError(f"Option '{option_text}' not found (or visible) after clicking trigger.")
+
+        option_id = remote_obj["objectId"]
+
+        # 4. Click
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": option_id})
+        point = self._get_center_by_id(option_id)
+        
+        if point:
+            self.mouse_move(point["x"], point["y"])
+            self.mouse_down(point["x"], point["y"])
+            self.mouse_up(point["x"], point["y"])
+        else:
+            self._send("Runtime.callFunctionOn", {
+                "functionDeclaration": "function() { this.click(); }",
+                "objectId": option_id
             })
-            result = self._recv(msg_id)
-            remote_obj = result["result"]["result"]
             
-            if remote_obj.get("subtype") == "null" or "objectId" not in remote_obj:
-                raise RuntimeError(f"Option '{option_text}' not found (or visible) after clicking trigger.")
-
-            option_id = remote_obj["objectId"]
-
-            # 4. Click
-            self._send("DOM.scrollIntoViewIfNeeded", {"objectId": option_id})
-            point = self._get_center_by_id(option_id)
-            
-            if point:
-                self.mouse_move(point["x"], point["y"])
-                self.mouse_down(point["x"], point["y"])
-                self.mouse_up(point["x"], point["y"])
-            else:
-                self._send("Runtime.callFunctionOn", {
-                    "functionDeclaration": "function() { this.click(); }",
-                    "objectId": option_id
-                })
-                
-            time.sleep(STEP_DELAY)
-        except Exception as e:
-            self._save_debug_screenshot("select_custom_option_failed")
-            raise e
+        time.sleep(STEP_DELAY)
 
     def select_autocomplete_option(self, input_xpath: str, select_text: str):
         """
@@ -1622,77 +1759,73 @@ class ChromeCDP:
         3. After EACH char, checks if 'select_text' option is visible.
         4. If found, clicks immediately and stops typing.
         """
-        try:
-            self._ensure_page_actionable()
+        self._ensure_page_actionable()
 
-            #1: Get Stable Reference & Focus
-            obj_id = self._get_object_id(input_xpath)
-            if not obj_id:
-                raise RuntimeError(f"Autocomplete input not found: {input_xpath}")
+        #1: Get Stable Reference & Focus
+        obj_id = self._get_object_id(input_xpath)
+        if not obj_id:
+            raise RuntimeError(f"Autocomplete input not found: {input_xpath}")
 
-            print(f"Focusing input: {input_xpath}")
-            self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
-            self._send("Runtime.callFunctionOn", {
-                "functionDeclaration": "function() { this.focus(); this.value = ''; }",
-                "objectId": obj_id
-            })
+        print(f"Focusing input: {input_xpath}")
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+        self._send("Runtime.callFunctionOn", {
+            "functionDeclaration": "function() { this.focus(); this.value = ''; }",
+            "objectId": obj_id
+        })
 
-            #2: Type and Check Loop        
-            check_js = f"""
-            (function() {{
-                const query = {json.dumps(select_text)}.toLowerCase().trim();
-                // Search all potential list items
-                const candidates = document.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
-                
-                for (const el of candidates) {{
-                    // 1. Visibility Check
-                    const style = window.getComputedStyle(el);
-                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
-                    const rect = el.getBoundingClientRect();
-                    if (rect.width < 5 || rect.height < 5) continue;
-
-                    // 2. Text Match
-                    const text = el.innerText.toLowerCase().trim();
-                    
-                    // We want the element that IS the option, not just contains it
-                    // So we check if the text matches closely
-                    if (text === query || (text.includes(query) && text.length < query.length + 30)) {{
-                        return true;
-                    }}
-                }}
-                return false;
-            }})()
-            """
-
-            found = False
-            print(f"Typing '{select_text}'...")
-
-            for i, char in enumerate(select_text):
-                # A. Type the character
-                self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": char})
-                self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
-                self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
-                
-                # B. Small delay for JS to react
-                time.sleep(AUTO_DELAY) 
-
-                # C. Check if target appeared (Start checking after 2nd char to save resources)
-                if i >= 1: 
-                    msg_id = self._send("Runtime.evaluate", {"expression": check_js})
-                    if self._recv(msg_id)["result"]["result"]["value"]:
-                        print(f"Target '{select_text}' appeared! Stopping input.")
-                        found = True
-                        break
+        #2: Type and Check Loop        
+        check_js = f"""
+        (function() {{
+            const query = {json.dumps(select_text)}.toLowerCase().trim();
+            // Search all potential list items
+            const candidates = document.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
             
-            # 3: Click the result
-            if not found:
-                # wait one last second
-                time.sleep(1.0)
+            for (const el of candidates) {{
+                // 1. Visibility Check
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+                const rect = el.getBoundingClientRect();
+                if (rect.width < 5 || rect.height < 5) continue;
+
+                // 2. Text Match
+                const text = el.innerText.toLowerCase().trim();
                 
-            self._select_visible_option(select_text)
-        except Exception as e:
-            self._save_debug_screenshot("select_autocomplete_option_failed")
-            raise e
+                // We want the element that IS the option, not just contains it
+                // So we check if the text matches closely
+                if (text === query || (text.includes(query) && text.length < query.length + 30)) {{
+                    return true;
+                }}
+            }}
+            return false;
+        }})()
+        """
+
+        found = False
+        print(f"Typing '{select_text}'...")
+
+        for i, char in enumerate(select_text):
+            # A. Type the character
+            self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": char})
+            self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
+            self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
+            
+            # B. Small delay for JS to react
+            time.sleep(AUTO_DELAY) 
+
+            # C. Check if target appeared (Start checking after 2nd char to save resources)
+            if i >= 1: 
+                msg_id = self._send("Runtime.evaluate", {"expression": check_js})
+                if self._recv(msg_id)["result"]["result"]["value"]:
+                    print(f"Target '{select_text}' appeared! Stopping input.")
+                    found = True
+                    break
+        
+        # 3: Click the result
+        if not found:
+            # wait one last second
+            time.sleep(1.0)
+            
+        self._select_visible_option(select_text)
 
 
     def _select_visible_option(self, option_text):
@@ -1759,55 +1892,51 @@ class ChromeCDP:
             })
 
     def multi_select(self, select_xpath: str, values: list[str]):
-        try:
-            self._ensure_page_actionable()
+        self._ensure_page_actionable()
 
-            # 1. Get Stable Reference
-            obj_id = self._get_object_id(select_xpath)
-            if not obj_id:
-                raise RuntimeError(f"Multi-select element not found or hidden: {select_xpath}")
+        # 1. Get Stable Reference
+        obj_id = self._get_object_id(select_xpath)
+        if not obj_id:
+             raise RuntimeError(f"Multi-select element not found or hidden: {select_xpath}")
 
-            # 2. Scroll
-            self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+        # 2. Scroll
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
 
-            # 3. Execute on ID
-            expr = f"""
-            function() {{
-                const select = this;
-                if (!select.multiple) return false;
+        # 3. Execute on ID
+        expr = f"""
+        function() {{
+            const select = this;
+            if (!select.multiple) return false;
 
-                const values = {json.dumps(values)};
-                let foundAny = false;
-                
-                for (const option of select.options) {{
-                    if (values.includes(option.value) || values.includes(option.text.trim())) {{
-                        option.selected = true;
-                        foundAny = true;
-                    }} else {{
-                        option.selected = false;
-                    }}
-                }}
-                
-                if (foundAny) {{
-                    select.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    select.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                }}
-                return true;
-            }}
-            """
-
-            msg_id = self._send("Runtime.callFunctionOn", {
-                "objectId": obj_id,
-                "functionDeclaration": expr,
-                "returnByValue": True
-            })
+            const values = {json.dumps(values)};
+            let foundAny = false;
             
-            result = self._recv(msg_id)["result"]["result"]
-            if result.get("value") is not True:
-                raise RuntimeError("Multi-select failed or element was not multiple")
-        except Exception as e:
-            self._save_debug_screenshot("multi_select_failed")
-            raise e
+            for (const option of select.options) {{
+                if (values.includes(option.value) || values.includes(option.text.trim())) {{
+                    option.selected = true;
+                    foundAny = true;
+                }} else {{
+                    option.selected = false;
+                }}
+            }}
+            
+            if (foundAny) {{
+                select.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                select.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            }}
+            return true;
+        }}
+        """
+
+        msg_id = self._send("Runtime.callFunctionOn", {
+            "objectId": obj_id,
+            "functionDeclaration": expr,
+            "returnByValue": True
+        })
+        
+        result = self._recv(msg_id)["result"]["result"]
+        if result.get("value") is not True:
+            raise RuntimeError("Multi-select failed or element was not multiple")
 
 
     # --------------- Box Model Design ----------------
@@ -1933,6 +2062,7 @@ class ChromeCDP:
     def find_elements_by_text(self, query: str):
         """
         Scans the DOM for visible elements matching the query.
+        Matches against: Text, ID, Name, Class, Title, Aria-Label, and Role.
         Returns a 'Rich Fingerprint' of attributes for the LLM to analyze.
         """
         js_script = f"""
@@ -1940,6 +2070,11 @@ class ChromeCDP:
             const query = {json.dumps(query)}.toLowerCase().trim();
             const candidates = [];
             
+            // BROAD SELECTOR: Matches anything likely to be interactive
+            // - Standard: input, button, a, select, textarea
+            // - Accessibility: [role="button"], [role="link"], [role="menuitem"]
+            // - JavaScript: [onclick] (catches your pagination li!)
+            // - CSS Naming: Elements with 'btn', 'button', 'icon', 'arrow' in their class
             const selectors = `
                 input, button, a, textarea, select, 
                 [role="button"], [role="link"], [role="menuitem"], [role="tab"],
@@ -1964,7 +2099,7 @@ class ChromeCDP:
                 const className = (el.className || '').toLowerCase(); 
                 const role = (el.getAttribute('role') || '').toLowerCase();
                 
-                // 3. The Match Logic
+                // 3. The Match Logic (Does ANY field contain the query?)
                 if (text.includes(query) || val.includes(query) || ph.includes(query) || 
                     name.includes(query) || id.includes(query) || aria.includes(query) ||
                     title.includes(query) || className.includes(query) || role.includes(query)) {{
@@ -1974,6 +2109,8 @@ class ChromeCDP:
                     if (el.id) {{
                         xpath = `//*[@id='${{el.id}}']`;
                     }} else {{
+                        // Generate a path based on hierarchy if no ID
+                        // (Simplified logic for brevity, matches your existing pattern)
                         const tag = el.tagName.toLowerCase();
                         if (el.innerText && el.innerText.trim().length > 0 && el.innerText.trim().length < 50) {{
                             const cleanText = el.innerText.trim().replace(/'/g, "");
@@ -1981,17 +2118,18 @@ class ChromeCDP:
                         }} else if (el.getAttribute('name')) {{
                             xpath = `//${{tag}}[@name='${{el.getAttribute('name')}}']`;
                         }} else if (el.className) {{
-                            // FIX: Changed '#' to '//' for JS comment to prevent Syntax Error
-                            const cleanClass = el.className.trim().split(' ')[0]; // Take first class
+                             // Fallback to class match if unique-ish
+                            const cleanClass = el.className.trim().split(' ')[0]; # Take first class
                             if (cleanClass) xpath = `//${{tag}}[contains(@class, '${{cleanClass}}')]`;
                         }}
                         
+                        // Absolute fallback if we couldn't make a nice relative path
                         if (!xpath) {{
-                             xpath = `//${{tag}}`;
+                             xpath = `//${{tag}}`; // Warning: This is vague, but the loop usually finds better attributes
                         }}
                     }}
                     
-                    // 5. Return The "Whole Shebang"
+                    // 5. Return The "Whole Shebang" (Rich Attributes)
                     candidates.push({{
                         tag: el.tagName.toLowerCase(),
                         text: (el.innerText || el.value || '').trim().substring(0, 50),
@@ -2011,24 +2149,8 @@ class ChromeCDP:
             return candidates;
         }})()
         """
-        
-        # Send command
         msg_id = self._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
-        response = self._recv(msg_id)
-
-        # --- ROBUST RESULT EXTRACTION ---
-        
-        # Check for JS Errors
-        if "exceptionDetails" in response.get("result", {}):
-            error_msg = response["result"]["exceptionDetails"]["exception"]["description"]
-            print(f"CRITICAL JS ERROR in find_elements_by_text: {error_msg}")
-            return [] # Return empty list safely instead of crashing
-
-        # Safe .get() chain
-        result_val = response.get("result", {}).get("result", {}).get("value")
-        
-        # Ensure it's a list (in case JS returned null)
-        return result_val if isinstance(result_val, list) else []
+        return self._recv(msg_id)["result"]["result"]["value"]
 
     def get_all_interactive_elements(self, tag_name: str = "button"):
         """
@@ -2074,15 +2196,7 @@ class ChromeCDP:
         }})()
         """
         msg_id = self._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
-        response = self._recv(msg_id)
-
-        # Robust Extraction
-        if "exceptionDetails" in response.get("result", {}):
-            print(f"JS ERROR in get_all_interactive_elements: {response['result']['exceptionDetails']}")
-            return []
-
-        result_val = response.get("result", {}).get("result", {}).get("value")
-        return result_val if isinstance(result_val, list) else []
+        return self._recv(msg_id)["result"]["result"]["value"]
 
     # ---------------- Clean Up Tool ----------------
     def _clean_old_profiles(self, max_age_seconds=300):        
