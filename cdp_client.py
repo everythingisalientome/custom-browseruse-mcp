@@ -1359,11 +1359,13 @@ class ChromeCDP:
             return el.innerText || el.textContent || '';
         }
         """
-        result = self._send("Runtime.callFunctionOn", {
+        msg_id = self._send("Runtime.callFunctionOn", {
             "objectId": obj_id,
             "functionDeclaration": expr,
             "returnByValue": True
         })
+
+        result = self._recv(msg_id)
         
         # Safety for null/undefined results
         res_root = result.get("result", {})
@@ -1442,12 +1444,12 @@ class ChromeCDP:
                 const data = [];
                 const headers = [];
                 
-                // Headers strategy...
+                // Headers
                 let headerCells = table.querySelectorAll('thead th');
                 if (headerCells.length === 0) headerCells = table.querySelectorAll('tr:first-child th');
                 headerCells.forEach(th => headers.push(th.innerText.trim()));
                 
-                // Rows strategy...
+                // Rows
                 let rows = table.querySelectorAll('tbody tr');
                 if (rows.length === 0) rows = table.querySelectorAll('tr');
                 
@@ -1457,21 +1459,18 @@ class ChromeCDP:
                     if (cells.length === 0) continue;
                     
                     const rowObj = {};
-                    // REMOVED: const rowArr = []; // No longer needed
                     
                     cells.forEach((cell, i) => {
-                        const txt = cell.innerText.trim().replace(/\n/g, ' ');
+                        // FIX: Use double backslash \\n so Python sends \n to JS
+                        const txt = cell.innerText.trim().replace(/\\n/g, ' ');
                         
-                        // LOGIC UPDATE: Always populate the Object
                         if (headers[i]) {
                             rowObj[headers[i]] = txt;
                         } else {
-                            // Fallback for missing headers: "column_0", "column_1"
                             rowObj[`column_${i}`] = txt;
                         }
                     });
                     
-                    // LOGIC UPDATE: Always push the Object, never the Array
                     data.push(rowObj);
                 }
                 return data;
@@ -1483,7 +1482,21 @@ class ChromeCDP:
                 "functionDeclaration": scraper_js,
                 "returnByValue": True
             })
-            page_data = self._recv(msg_id)["result"]["result"]["value"]
+            
+            #Receive Response
+            response = self._recv(msg_id)
+
+            #Error Handling (had previous failures here)
+            if "exceptionDetails" in response["result"]:
+                # Print the JS error description
+                error_msg = response["result"]["exceptionDetails"]["exception"]["description"]
+                print(f"JS Error in scrape_table: {error_msg}")
+                # Return empty list or break
+                break
+
+            # 4. Extract Data safely
+            page_data = response["result"]["result"]["value"]
+            
             all_data.extend(page_data)
             print(f"Scraped {len(page_data)} rows from page {page + 1}")
             
