@@ -293,3 +293,40 @@ async def select_autocomplete(input_xpath: str, select_text: str):
         return ok()
     except Exception as e:
         return err("AUTOCOMPLETE_FAILED", str(e))
+    
+
+# ---------------- Extraction tools ----------------
+@app.tool()
+async def get_text(xpath: str):
+    """
+    Get the visible text or value from any element (label, input, div, span, etc).
+    Use this to read data from the screen.
+    """
+    try:
+        text = cdp.get_text(xpath)
+        return ok(text=text)
+    except Exception as e:
+        return err("GET_TEXT_FAILED", str(e))
+
+@app.tool()
+async def get_table_data(
+    table_xpath: str, 
+    next_page_xpath: str = None, 
+    max_pages: int = 0,
+    total_pages_xpath: str = None
+):
+    """
+    Extract data from a table (with optional pagination).
+    
+    Args:
+        table_xpath: XPath to the <table> (or container).
+        next_page_xpath: (Optional) XPath to the 'Next' button.
+        max_pages: (Optional) Exact number of pages to scrape (e.g., 5).
+        total_pages_xpath: (Optional) XPath to a label like "Page 1 of 10". 
+                           Use this to automatically determine how many pages to scrape.
+    """
+    try:
+        data = cdp.scrape_table(table_xpath, next_page_xpath, max_pages, total_pages_xpath)
+        return ok(count=len(data), data=data)
+    except Exception as e:
+        return err("TABLE_SCRAPE_FAILED", str(e))

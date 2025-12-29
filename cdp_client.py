@@ -15,6 +15,7 @@ import base64
 import shutil
 import glob
 from pathlib import Path
+import re
 
 from tracemanager import TraceManager
 
@@ -465,7 +466,6 @@ class ChromeCDP:
 
 
     # --------------- Wait helpers ----------------
-
     def wait_for_element(self, xpath, timeout_ms=DEFAULT_TIMEOUT):
         self.wait_for_dom_stable(timeout_ms)
 
@@ -1149,7 +1149,7 @@ class ChromeCDP:
             "code": code_val,
             "modifiers": mod_mask,
             "windowsVirtualKeyCode": 0, 
-            "nativeVirtualKeyCode":
+            "nativeVirtualKeyCode": 0
         })
         
         self._send("Input.dispatchKeyEvent", {
@@ -1203,9 +1203,10 @@ class ChromeCDP:
 
     def type_human(self, xpath: str, text: str):
         """
-        Types text like a human:
+        Types text like a human (Appends to existing text).
         1. Focuses the element.
-        3. Types the new text one char at a time with delays.
+        2. Types one char at a time with delays.
+        Does NOT clear the field first.
         """
         self._ensure_page_actionable()
 
@@ -1217,6 +1218,7 @@ class ChromeCDP:
         self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
         
         # 2. Focus to field
+        # We use a physical click to ensure the browser strictly focuses it
         point = self._get_center_by_id(obj_id)
         if point:
             self.mouse_move(point["x"], point["y"])
@@ -1229,49 +1231,205 @@ class ChromeCDP:
             })
         
         time.sleep(STEP_DELAY)
-        
-        ''' Commented out - so that I can send the events separately 
-        # # 3. Clear using Ctrl+A and Backspace
-        
-        # # Press Ctrl (Modifier 2)
-        # self._send("Input.dispatchKeyEvent", {
-        #     "type": "keyDown", "key": "Control", "code": "ControlLeft", "modifiers": 2
-        # })
-        
-        # # Press A (with Ctrl mod)
-        # self._send("Input.dispatchKeyEvent", {
-        #     "type": "keyDown", "key": "a", "code": "KeyA", "modifiers": 2
-        # })
-        # self._send("Input.dispatchKeyEvent", { # Char event is needed by some browsers
-        #     "type": "char", "text": "a" 
-        # })
-        # self._send("Input.dispatchKeyEvent", {
-        #     "type": "keyUp", "key": "a", "code": "KeyA", "modifiers": 2
-        # })
-        
-        # # Release Ctrl
-        # self._send("Input.dispatchKeyEvent", {
-        #     "type": "keyUp", "key": "Control", "code": "ControlLeft", "modifiers": 0
-        # })
 
-        # time.sleep(STEP_DELAY)
-
-        # # Press Backspace
-        # self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Backspace", "code": "Backspace"})
-        # self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Backspace", "code": "Backspace"})
-
-        # time.sleep(STEP_DELAY)
-        '''
-
-        # 4. Human like typeing
+        # 3. Human like typing (Loop)
+        # REMOVED: The Ctrl+A + Backspace block is gone.
+        
         print(f"Human typing into {xpath}...")
         for char in text:
+            # FIX: Send 'key' only for Up/Down, 'text' only for Char event
             self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": char})
             self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
             self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
             
+            # Jitter the delay to look natural
             jitter = (ord(char) % 3) * 0.02 
             time.sleep(HUMAN_DELAY + jitter)
+
+
+    # ---------------- Data Extraction Tools ----------------
+    def get_text(self, xpath: str) -> str:
+        """
+        Retrieves text from ANY element. 
+        Smartly handles Inputs (value), Selects (selected text), and Nodes (innerText).
+        """
+        self._ensure_page_actionable()
+
+        # 1. Get Stable Reference
+        obj_id = self._get_object_id(xpath)
+        if not obj_id:
+            raise RuntimeError(f"Element not found for text retrieval: {xpath}")
+
+        # 2. Extract Text via JS
+        expr = """
+        function() {
+            const el = this;
+            const tag = el.tagName.toLowerCase();
+            
+            if (tag === 'input' || tag === 'textarea') {
+                return el.value || '';
+            } else if (tag === 'select') {
+                return el.options[el.selectedIndex].text || '';
+            } else {
+                return el.innerText || el.textContent || '';
+            }
+        }
+        """
+        result = self._send("Runtime.callFunctionOn", {
+            "objectId": obj_id,
+            "functionDeclaration": expr,
+            "returnByValue": True
+        })
+        return str(result["result"]["result"]["value"]).strip()
+
+    def scrape_table(
+        self, 
+        table_xpath: str, 
+        next_page_xpath: str = None, 
+        max_pages: int = 0,
+        total_pages_xpath: str = None
+    ):
+        """
+        Scrapes a table into a list of dictionaries.
+        
+        Args:
+            table_xpath: XPath to the table/container.
+            next_page_xpath: XPath to the 'Next' button.
+            max_pages: Explicit limit (e.g., scrape 5 pages).
+            total_pages_xpath: XPath to an element showing "Page 1 of N". 
+                               We extract 'N' to determine the limit dynamically.
+        """
+        # Safety cap to prevent infinite loops
+        SAFETY_LIMIT = 50 
+        
+        # 1. Determine the hard limit
+        if max_pages > 0:
+            limit = max_pages
+            print(f"Scraping limit set by user: {limit} pages")
+        elif total_pages_xpath:
+            # Try to extract the limit from the UI (e.g., "Page 1 of 7")
+            try:
+                text = self.get_text(total_pages_xpath)
+                # Look for number after 'of' or '/' (e.g. "of 7", "/ 7")
+                match = re.search(r"(?:of|/)\s*(\d+)", text, re.IGNORECASE)
+                
+                if match:
+                    limit = int(match.group(1))
+                else:
+                    # Fallback: find the last number in the string
+                    numbers = re.findall(r"(\d+)", text)
+                    limit = int(numbers[-1]) if numbers else SAFETY_LIMIT
+                
+                print(f"Detected total pages from UI: {limit}")
+                
+            except Exception as e:
+                print(f"Could not extract page count from {total_pages_xpath}: {e}")
+                limit = SAFETY_LIMIT
+        else:
+            limit = SAFETY_LIMIT
+            print(f"No limit specified. Using safety cap: {limit} pages")
+        
+        all_data = []
+        
+        # 2. Scrape Loop
+        for page in range(limit):
+            # A. Ensure page is ready
+            if page > 0:
+                self._ensure_page_actionable()
+                time.sleep(DOM_IDLE_MS / 1000)
+
+            # B. Get Table ID (Re-fetch every loop)
+            table_id = self._get_object_id(table_xpath)
+            if not table_id:
+                print(f"Table not found on page {page + 1}. Stopping.")
+                break
+                
+            # C. Scrape Data (JS)
+            scraper_js = """
+            function() {
+                const table = this;
+                const data = [];
+                const headers = [];
+                
+                // Headers strategy...
+                let headerCells = table.querySelectorAll('thead th');
+                if (headerCells.length === 0) headerCells = table.querySelectorAll('tr:first-child th');
+                headerCells.forEach(th => headers.push(th.innerText.trim()));
+                
+                // Rows strategy...
+                let rows = table.querySelectorAll('tbody tr');
+                if (rows.length === 0) rows = table.querySelectorAll('tr');
+                
+                for (const row of rows) {
+                    if (row.querySelector('th')) continue;
+                    const cells = row.querySelectorAll('td');
+                    if (cells.length === 0) continue;
+                    
+                    const rowObj = {};
+                    // REMOVED: const rowArr = []; // No longer needed
+                    
+                    cells.forEach((cell, i) => {
+                        const txt = cell.innerText.trim().replace(/\n/g, ' ');
+                        
+                        // LOGIC UPDATE: Always populate the Object
+                        if (headers[i]) {
+                            rowObj[headers[i]] = txt;
+                        } else {
+                            // Fallback for missing headers: "column_0", "column_1"
+                            rowObj[`column_${i}`] = txt;
+                        }
+                    });
+                    
+                    // LOGIC UPDATE: Always push the Object, never the Array
+                    data.push(rowObj);
+                }
+                return data;
+            }
+            """
+            
+            msg_id = self._send("Runtime.callFunctionOn", {
+                "objectId": table_id,
+                "functionDeclaration": scraper_js,
+                "returnByValue": True
+            })
+            page_data = self._recv(msg_id)["result"]["result"]["value"]
+            all_data.extend(page_data)
+            print(f"Scraped {len(page_data)} rows from page {page + 1}")
+            
+            # D. Handle Pagination
+            if not next_page_xpath:
+                break
+
+            # Stop if we reached our calculated limit
+            if page >= limit - 1:
+                print("Reached calculated page limit. Stopping.")
+                break
+
+            try:
+                next_id = self._get_object_id(next_page_xpath)
+                if not next_id:
+                    print("Pagination 'Next' button hidden. Stopping.")
+                    break
+                
+                is_disabled = self._send("Runtime.callFunctionOn", {
+                    "objectId": next_id,
+                    "functionDeclaration": "function() { return this.disabled || this.classList.contains('disabled') || this.getAttribute('aria-disabled') === 'true'; }",
+                    "returnByValue": True
+                })["result"]["result"]["value"]
+                
+                if is_disabled:
+                    print("Pagination 'Next' button is disabled. Stopping.")
+                    break
+                    
+                print(f"Navigating to table page {page + 2}...")
+                self.click(next_page_xpath)
+                
+            except Exception as e:
+                print(f"Pagination failed: {e}")
+                break
+                
+        return all_data
+    
 
     # ------------ Screenshot tools ------------
     def screenshot(self, full_page: bool = True):
