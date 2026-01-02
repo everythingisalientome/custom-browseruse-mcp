@@ -293,7 +293,30 @@ async def select_autocomplete(input_xpath: str, select_text: str):
         return ok()
     except Exception as e:
         return err("AUTOCOMPLETE_FAILED", str(e))
+
+# ---------------- Tab Management Tool ----------------
+
+@app.tool()
+async def switch_tab(keyword: str = None, new_tab: bool = False):
+    """
+    Switches the browser focus to a different tab.
     
+    Args:
+        keyword: (Optional) A word to look for in the tab's Title or URL (e.g. "Report", "Google").
+        new_tab: (Optional) If True, switches to the NEWEST tab (index -1). 
+                 Use this immediately after clicking a link that opens a new window.
+    """
+    try:
+        if new_tab:
+            cdp.switch_to_tab(index=-1)
+        elif keyword:
+            cdp.switch_to_tab(keyword=keyword)
+        else:
+            return err("INVALID_ARGS", "Must provide either 'keyword' or 'new_tab=True'")
+            
+        return ok(message="Switched tab successfully")
+    except Exception as e:
+        return err("SWITCH_FAILED", str(e))
 
 # ---------------- Extraction tools ----------------
 @app.tool()

@@ -2084,6 +2084,93 @@ class ChromeCDP:
         result_val = response.get("result", {}).get("result", {}).get("value")
         return result_val if isinstance(result_val, list) else []
 
+    # ---------------- Tab Management ----------------
+
+    def get_tabs(self):
+        """
+        Returns a list of all open browser tabs (targets).
+        """
+        try:
+            response = self.http.get(f"http://localhost:{DEBUG_PORT}/json", timeout=2)
+            if not response.ok: 
+                return []
+            
+            # Filter for pages only (exclude service workers/extensions)
+            pages = [t for t in response.json() if t.get("type") == "page"]
+            return pages
+        except Exception as e:
+            print(f"Error fetching tabs: {e}")
+            return []
+
+    def switch_to_tab(self, keyword: str = None, index: int = None):
+        """
+        Switches the automation connection to a different tab.
+        
+        Args:
+            keyword: A word to match in the Title or URL (case-insensitive).
+            index: 0 for the first tab, -1 for the newest/last tab.
+        """
+        print(f"Switching tab matching: keyword='{keyword}', index={index}...")
+        
+        # 1. Fetch current tabs
+        # Retry a few times in case the new tab is still initializing
+        target = None
+        for _ in range(5):
+            tabs = self.get_tabs()
+            
+            # Strategy A: Match by Index (e.g., -1 for newest)
+            if index is not None:
+                if 0 <= index < len(tabs):
+                    target = tabs[index]
+                elif index < 0 and abs(index) <= len(tabs):
+                    # Chrome usually appends new tabs to the end of the list
+                    target = tabs[index]
+            
+            # Strategy B: Match by Keyword (Title or URL)
+            elif keyword:
+                for t in tabs:
+                    title = t.get("title", "").lower()
+                    url = t.get("url", "").lower()
+                    if keyword.lower() in title or keyword.lower() in url:
+                        target = t
+                        break
+            
+            if target:
+                break
+            time.sleep(0.5) # Wait for tab to appear
+            
+        if not target:
+            raise RuntimeError(f"No tab found matching keyword='{keyword}' or index={index}")
+
+        # 2. Hot-Swap the WebSocket
+        print(f"Connecting to target: {target.get('title')} ({target['id']})")
+        
+        # Close old connection safely
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+        
+        # Connect to new target
+        try:
+            self.ws = websocket.WebSocket()
+            self.ws.connect(target["webSocketDebuggerUrl"], timeout=5)
+            self.ws.settimeout(1)
+        except Exception as e:
+            raise RuntimeError(f"Failed to connect to new tab: {e}")
+
+        # 3. Re-Initialize Domains
+        # The new tab doesn't know we are automating it, so we must re-enable everything.
+        self._inflight_requests = 0 # Reset network counter
+        self._enable_domains()
+        self.force_viewport(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+        
+        # 4. Stabilize
+        self._ensure_page_actionable(timeout_ms=5000)
+        print("Tab switch successful.")
+
+
     # ---------------- Clean Up Tool ----------------
     def _clean_old_profiles(self, max_age_seconds=300):        
         pattern = os.path.join(USER_DATA_DIR, "cdp-profile-*")
