@@ -357,30 +357,17 @@ class ChromeCDP:
         return self._recv(msg_id)["result"]["result"]["value"]
 
     # ---------------- Wait helpers ----------------
-    def wait_for_element(self, xpath, timeout_ms=DEFAULT_TIMEOUT):
+    def wait_for_element(self, xpath: str = None, label: str = None, role: str = None, timeout_ms=DEFAULT_TIMEOUT):
         self.wait_for_dom_stable(timeout_ms)
         deadline = time.monotonic() + timeout_ms / 1000
-        expr = f"""
-        (function () {{
-            const snapshot = document.evaluate("{xpath}", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-            for (let i = 0; i < snapshot.snapshotLength; i++) {{
-                const el = snapshot.snapshotItem(i);
-                const r = el.getBoundingClientRect();
-                const s = window.getComputedStyle(el);
-                if (r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none') return true;
-            }}
-            return false;
-        }})()
-        """
+        
         while time.monotonic() < deadline:
-            params = {"expression": expr}
-            if self.current_context_id:
-                params["contextId"] = self.current_context_id
-            
-            msg_id = self._send("Runtime.evaluate", params)
-            if self._recv(msg_id)["result"]["result"]["value"]: return True
+            # We reuse the "Detective" logic. If it returns an ID, the element is found AND visible.
+            if self._get_object_id(xpath, label, role):
+                return True
             time.sleep(STEP_DELAY)
-        raise TimeoutError(f"Element not visible: {xpath}")
+            
+        raise TimeoutError(f"Element not visible: xpath='{xpath}', label='{label}'")
 
     def wait_for_dom_stable(self, timeout_ms=DOM_TIMEOUT, idle_ms=DOM_IDLE_MS):
         deadline = time.monotonic() + timeout_ms / 1000
@@ -517,20 +504,20 @@ class ChromeCDP:
         
         self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.click(); this.click(); }", "objectId": obj_id})
 
-    def drag_and_drop(self, source_xpath, target_xpath, timeout_ms=DEFAULT_TIMEOUT):
+    def drag_and_drop(self, source_xpath=None, target_xpath=None, source_label=None, target_label=None, timeout_ms=DEFAULT_TIMEOUT):
         self._ensure_page_actionable(timeout_ms=timeout_ms)
-        self.wait_for_element(source_xpath, timeout_ms=timeout_ms)
-        self.wait_for_element(target_xpath, timeout_ms=timeout_ms)
         
-        src_id = self._get_object_id(source_xpath)
-        tgt_id = self._get_object_id(target_xpath)
-        if not src_id or not tgt_id: raise RuntimeError("Drag failed: could not resolve source or target ID")
+        src_id = self._get_object_id(source_xpath, source_label)
+        tgt_id = self._get_object_id(target_xpath, target_label)
+        
+        if not src_id or not tgt_id: raise RuntimeError("Drag failed: could not resolve source or target")
 
         self._send("DOM.scrollIntoViewIfNeeded", {"objectId": src_id})
         self._send("DOM.scrollIntoViewIfNeeded", {"objectId": tgt_id})
         
         src = self._get_center_by_id(src_id)
         tgt = self._get_center_by_id(tgt_id)
+        
         if src and tgt:
             self.mouse_move(src["x"], src["y"])
             self.mouse_down(src["x"], src["y"])
@@ -555,7 +542,7 @@ class ChromeCDP:
                     self._ensure_page_actionable(timeout_ms=PAGE_LOAD_TIMEOUT)
                     # Note: We rely on _get_object_id's internal wait/check, but can add explicit wait if xpath is present
                     if xpath:
-                         try: self.wait_for_element(xpath, timeout_ms=DEFAULT_TIMEOUT)
+                         try: self.wait_for_element(xpath=xpath, label=label,role=role ,timeout_ms=DEFAULT_TIMEOUT)
                          except: pass # Fallback to label strategy if xpath fails
 
                     obj_id = self._get_object_id(xpath, label, role)
@@ -615,7 +602,7 @@ class ChromeCDP:
                     self._ensure_page_actionable(timeout_ms=PAGE_LOAD_TIMEOUT)
                     # Smart Wait
                     if xpath:
-                         try: self.wait_for_element(xpath, timeout_ms=DEFAULT_TIMEOUT)
+                         try: self.wait_for_element(xpath=xpath, label=label, role=role, timeout_ms=DEFAULT_TIMEOUT)
                          except: pass # Fallback to label strategy
 
                     obj_id = self._get_object_id(xpath, label, role)
@@ -667,10 +654,10 @@ class ChromeCDP:
                 time.sleep(STEP_DELAY)
         raise TimeoutError(f"Page failed to stabilize within {timeout_ms}ms")
 
-    def send_keys(self, keys: str, xpath: str = None):
+    def send_keys(self, keys: str, xpath: str = None, label: str = None, role: str = None):
         self._ensure_page_actionable()
         if xpath:
-            obj_id = self._get_object_id(xpath)
+            obj_id = self._get_object_id(xpath, label, role)
             if not obj_id: raise RuntimeError(f"Cannot send keys; element not found: {xpath}")
             self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
             self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
@@ -695,29 +682,17 @@ class ChromeCDP:
         self._send("Input.dispatchKeyEvent", {"type": type_down, "key": key_val, "code": code_val, "modifiers": mod_mask, "windowsVirtualKeyCode": 0, "nativeVirtualKeyCode": 0})
         self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": key_val, "code": code_val, "modifiers": mod_mask})
 
-    def scroll_into_view(self, xpath):
-        expr = f"""
-        (function () {{
-            const snapshot = document.evaluate("{xpath}", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-            for (let i = 0; i < snapshot.snapshotLength; i++) {{
-                const el = snapshot.snapshotItem(i);
-                const style = window.getComputedStyle(el);
-                if (style.display !== 'none' && style.visibility !== 'hidden') {{
-                    el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
-                    return true;
-                }}
-            }}
-            return false;
-        }})()
-        """
-        msg_id = self._send("Runtime.evaluate", {"expression": expr})
-        result = self._recv(msg_id)["result"]["result"]
-        return result.get("value") is True
+    def scroll_into_view(self, xpath: str = None, label: str = None, role: str = None):
+        obj_id = self._get_object_id(xpath, label, role)
+        if not obj_id: return False
+        
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+        return True
 
-    def type_human(self, xpath: str, text: str):
+    def type_human(self, xpath: str, text: str, label: str = None, role: str = None):
         try:
             self._ensure_page_actionable()
-            obj_id = self._get_object_id(xpath)
+            obj_id = self._get_object_id(xpath, label, role)
             if not obj_id: raise RuntimeError(f"Element not found: {xpath}")
 
             self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
@@ -741,10 +716,10 @@ class ChromeCDP:
             self._save_debug_screenshot("type_human_failed")
             raise e
 
-    def get_text(self, xpath: str) -> str:
+    def get_text(self, xpath: str = None, label: str = None, role: str = None) -> str:
         self._ensure_page_actionable()
-        obj_id = self._get_object_id(xpath)
-        if not obj_id: raise RuntimeError(f"Element not found for text retrieval: {xpath}")
+        obj_id = self._get_object_id(xpath, label, role)
+        if not obj_id: raise RuntimeError(f"Element not found for text retrieval: {xpath or label}")
 
         expr = """
         function() {
@@ -754,23 +729,16 @@ class ChromeCDP:
             if (tag === 'textarea' || (tag === 'input' && inputTypes.includes(el.type))) return el.value || el.getAttribute('placeholder') || '';
             if (tag === 'input' && ['button', 'submit', 'reset'].includes(el.type)) return el.value || '';
             if (tag === 'select') return el.options[el.selectedIndex].text || '';
-            const childInput = el.querySelector('input, textarea, select');
-            if (childInput) {
-                const directText = el.innerText.replace(childInput.value || '', '').trim();
-                if (directText.length === 0) {
-                     if (childInput.tagName.toLowerCase() === 'select') return childInput.options[childInput.selectedIndex].text || '';
-                     return childInput.value || childInput.getAttribute('placeholder') || '';
-                }
+            
+            // Check for shadow root text content if main element is a container
+            if (el.shadowRoot) {
+                 return el.shadowRoot.textContent || el.innerText || '';
             }
             return el.innerText || el.textContent || '';
         }
         """
         msg_id = self._send("Runtime.callFunctionOn", {"objectId": obj_id, "functionDeclaration": expr, "returnByValue": True})
-        result = self._recv(msg_id)
-        res_root = result.get("result", {})
-        inner_res = res_root.get("result", {})
-        val = inner_res.get("value", "")
-        return str(val).strip()
+        return str(self._recv(msg_id)["result"]["result"].get("value", "")).strip()
 
     def scrape_table(self, table_xpath: str, next_page_xpath: str = None, max_pages: int = 0, total_pages_xpath: str = None):
         SAFETY_LIMIT = 50 
@@ -878,16 +846,16 @@ class ChromeCDP:
                 break
         return all_data
 
-    def is_checked(self, xpath: str) -> bool:
-        obj_id = self._get_object_id(xpath)
+    def is_checked(self, xpath: str = None, label: str = None, role: str = None) -> bool:
+        obj_id = self._get_object_id(xpath, label, role)
         if not obj_id: return False
-        result = self._send("Runtime.callFunctionOn", {"objectId": obj_id, "functionDeclaration": "function() { return this.checked; }", "returnByValue": True})
+        result = self._send("Runtime.callFunctionOn", {"objectId": obj_id, "functionDeclaration": "function() { return this.checked || this.getAttribute('aria-checked') === 'true'; }", "returnByValue": True})
         return self._recv(result)["result"]["result"]["value"] is True
     
-    def is_selected(self, xpath: str) -> bool:
-        obj_id = self._get_object_id(xpath)
+    def is_selected(self, xpath: str = None, label: str = None, role: str = None) -> bool:
+        obj_id = self._get_object_id(xpath, label, role)
         if not obj_id: return False
-        result = self._send("Runtime.callFunctionOn", {"objectId": obj_id, "functionDeclaration": "function() { return this.selected; }", "returnByValue": True})
+        result = self._send("Runtime.callFunctionOn", {"objectId": obj_id, "functionDeclaration": "function() { return this.selected || this.getAttribute('aria-selected') === 'true'; }", "returnByValue": True})
         return self._recv(result)["result"]["result"]["value"] is True
 
     def select_option(self, select_xpath: str, *, value: str | None = None, label: str | None = None, index: int | None = None):
@@ -918,11 +886,11 @@ class ChromeCDP:
             self._save_debug_screenshot("select_option_failed")
             raise e
 
-    def select_custom_option(self, trigger_xpath: str, option_text: str):
+    def select_custom_option(self, trigger_xpath: str, option_text: str, trigger_label: str = None):
         try:
             self._ensure_page_actionable()
             print(f"Clicking dropdown trigger: {trigger_xpath}")
-            self.click(trigger_xpath)
+            self.click(trigger_xpath, trigger_label)
             time.sleep(UI_DELAY) 
 
             expr = f"""
@@ -965,10 +933,10 @@ class ChromeCDP:
             self._save_debug_screenshot("custom_select_failed")
             raise e
 
-    def select_autocomplete_option(self, input_xpath: str, select_text: str):
+    def select_autocomplete_option(self, input_xpath: str, select_text: str, input_label: str = None):
         try:
             self._ensure_page_actionable()
-            obj_id = self._get_object_id(input_xpath)
+            obj_id = self._get_object_id(input_xpath, input_label)
             if not obj_id: raise RuntimeError(f"Autocomplete input not found: {input_xpath}")
 
             print(f"Focusing input: {input_xpath}")
@@ -1013,20 +981,40 @@ class ChromeCDP:
         expr = f"""
         (function() {{
             const query = {json.dumps(option_text)}.toLowerCase().trim();
-            const candidates = document.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
-            let bestEl = null; let bestScore = -1;
-            for (const el of candidates) {{
-                const rect = el.getBoundingClientRect();
-                const style = window.getComputedStyle(el);
-                if (rect.width < 5 || rect.height < 5 || style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') continue;
-                const text = el.innerText.toLowerCase().trim();
-                if (!text.includes(query)) continue;
-                let score = 0;
-                if (text === query) score += 100;
-                if (el.tagName === 'LI' || el.getAttribute('role') === 'option') score += 50;
-                if (text.length > query.length + 50) score -= 1000;
-                if (el.querySelector('.highlight') || el.classList.contains('highlight')) score += 20;
-                if (score > bestScore) {{ bestScore = score; bestEl = el; }}
+            const queue = [document];
+            
+            let bestEl = null; 
+            let bestScore = -1;
+
+            while (queue.length > 0) {{
+                const root = queue.shift();
+                
+                // 1. Scan candidates
+                const candidates = root.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
+                for (const el of candidates) {{
+                    if (el.shadowRoot) queue.push(el.shadowRoot);
+
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    if (rect.width < 1 || rect.height < 1 || style.visibility === 'hidden' || style.display === 'none') continue;
+                    
+                    const text = el.innerText.toLowerCase().trim();
+                    if (!text.includes(query)) continue;
+                    
+                    let score = 0;
+                    if (text === query) score += 100;
+                    if (el.tagName === 'LI' || el.getAttribute('role') === 'option') score += 50;
+                    if (text.length > query.length + 50) score -= 1000;
+                    if (el.classList.contains('highlight') || el.classList.contains('selected')) score += 20;
+                    
+                    if (score > bestScore) {{ bestScore = score; bestEl = el; }}
+                }}
+                
+                // 2. Queue all other shadow hosts (not just options)
+                const all = root.querySelectorAll('*');
+                for (const el of all) {{
+                    if (el.shadowRoot) queue.push(el.shadowRoot);
+                }}
             }}
             return bestEl;
         }})()
@@ -1046,10 +1034,10 @@ class ChromeCDP:
         else:
             self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.click(); }", "objectId": option_id})
 
-    def multi_select(self, select_xpath: str, values: list[str]):
+    def multi_select(self, select_xpath: str, values: list[str], label: str = None, role: str = None):
         try:
             self._ensure_page_actionable()
-            obj_id = self._get_object_id(select_xpath)
+            obj_id = self._get_object_id(select_xpath, label, role)
             if not obj_id: raise RuntimeError(f"Multi-select element not found or hidden: {select_xpath}")
 
             self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
@@ -1079,33 +1067,10 @@ class ChromeCDP:
             self._save_debug_screenshot("multi_select_failed")
             raise e
 
-    def _get_center_via_box_model(self, xpath):
-        expr = f"""
-        (function () {{
-            const snapshot = document.evaluate("{xpath}", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-            for (let i = 0; i < snapshot.snapshotLength; i++) {{
-                const el = snapshot.snapshotItem(i);
-                const style = window.getComputedStyle(el);
-                const rect = el.getBoundingClientRect();
-                if (rect.width > 0 && style.display !== 'none' && style.visibility !== 'hidden') return el;
-            }}
-            return null;
-        }})()
-        """
-        msg_id = self._send("Runtime.evaluate", {"expression": expr, "returnByValue": False})
-        result = self._recv(msg_id)
-        remote_obj = result["result"]["result"]
-        if remote_obj.get("subtype") == "null" or "objectId" not in remote_obj: return None
-        object_id = remote_obj["objectId"]
-        try:
-            box_id = self._send("DOM.getBoxModel", {"objectId": object_id})
-            box_result = self._recv(box_id)
-            if "error" in box_result: return None
-            quad = box_result["result"]["model"]["content"]
-            x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4
-            y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4
-            return {"x": x, "y": y}
-        except Exception: return None
+    def _get_center_via_box_model(self, xpath: str = None, label: str = None, role: str = None):
+        obj_id = self._get_object_id(xpath, label, role)
+        if not obj_id: return None
+        return self._get_center_by_id(obj_id)
         
     def _get_object_id(self, xpath: str = None, label: str = None, role: str = None):
         """

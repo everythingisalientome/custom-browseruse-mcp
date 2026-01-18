@@ -130,21 +130,43 @@ async def type_into(value: str, xpath: str = None, label: str = None, role: str 
         return err("TYPE_FAILED", str(e))
 
 @app.tool()
-async def send_keys(keys: str, xpath: str = None):
+async def send_keys(keys: str, xpath: str = None, label: str = None, role: str = None):
     """
     Sends special keys (Enter, Tab, etc.).
     """
     try:
-        cdp.send_keys(keys, xpath)
+        cdp.send_keys(keys, xpath, label, role)
         return ok(message=f"Sent keys: {keys}")
     except Exception as e:
         return err("KEY_FAILED", str(e))
-
+    
 @app.tool()
-async def get_text(xpath: str):
+async def scroll_into_view(xpath: str = None, label: str = None, role: str = None):
+    """
+    Scroll to the provided xpath or label.
+    """
+    try:
+        cdp.scroll_into_view(xpath, label, role)
+        return ok(message=f"Successfully scrolled to : {xpath or label}")
+    except Exception as e:
+        return err("SCROLL_FAILED", str(e))
+    
+@app.tool()
+async def type_like_human(keys: str, xpath: str = None, label: str = None, role: str = None):
+    """
+    Type like human would with keyboard; one character at one time.
+    """
+    try:
+        cdp.type_human(keys, xpath, label, role)
+        return ok(message=f"Success Typed like human: {keys}")
+    except Exception as e:
+        return err("TYPE_HUMAN_FAILED", str(e))
+    
+@app.tool()
+async def get_text(xpath: str, label: str = None, role: str = None):
     """Gets the visible text of an element."""
     try:
-        text = cdp.get_text(xpath)
+        text = cdp.get_text(xpath, label, role)
         return ok(data={"text": text})
     except Exception as e:
         return err("GET_TEXT_FAILED", str(e))
