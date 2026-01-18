@@ -9,6 +9,63 @@ cdp = ChromeCDP()
 def ok(**k): return {"status": "OK", **k}
 def err(code, msg): return {"status": "ERROR", "error_code": code, "message": msg}
 
+# ---------------- Helper Logic ----------------
+
+async def _attempt_fallback(label: str, role: str):
+    """
+    Python-side logic to find an element by Label/Role.
+    Useful for retrieving the 'Healed' XPath to update your CSV.
+    """
+    if not label: return None
+    
+    # 1. Use the "Smart Scanner" from CDP
+    candidates = cdp.find_elements_by_text(label)
+    if not candidates: return None
+
+    # 2. Filter by Role (Python Logic)
+    role = role.lower() if role else ""
+    best_match = None
+    
+    for c in candidates:
+        tag = c["tag"]
+        attrs = c.get("attributes", {})
+        c_role = (attrs.get("role") or "").lower()
+        c_type = (attrs.get("type") or "").lower()
+        c_class = (attrs.get("class") or "").lower()
+        
+        is_match = False
+        
+        # Heuristic Matching
+        if "button" in role:
+            if tag == "button" or "btn" in c_class or c_type in ["button", "submit"] or c_role == "button":
+                is_match = True
+        elif "text" in role or "edit" in role:
+            if tag in ["textarea", "input"] and c_type not in ["checkbox", "radio", "button", "submit"]:
+                is_match = True
+        elif "link" in role:
+            if tag == "a" or c_role == "link":
+                is_match = True
+        elif "combo" in role or "select" in role:
+            if tag == "select" or c_role == "combobox":
+                is_match = True
+        elif "check" in role:
+            if c_type == "checkbox" or c_role == "checkbox":
+                is_match = True
+        elif "radio" in role:
+             if c_type == "radio" or c_role == "radio":
+                is_match = True
+        else:
+            # If no specific role requested, accept the text match
+            is_match = True
+            
+        if is_match:
+            best_match = c
+            break # Take the first good match
+            
+    if best_match:
+        return best_match["xpath"]
+    return None
+
 # ---------------- Browser tools ----------------
 
 @app.tool()
@@ -41,270 +98,142 @@ async def navigate(url: str):
 # ---------------- Mouse and keyboard tools ----------------
 
 @app.tool()
-async def click(xpath: str):
+async def click(xpath: str = None, label: str = None, role: str = None):
+    """
+    Clicks an element.
+    Args:
+        xpath: The strict XPath (Preferred).
+        label: Visual text of the button (Fallback).
+        role: Type of element e.g. 'button', 'link' (Fallback).
+    """
     try:
-        cdp.click(xpath)
-        return ok()
-    except TimeoutError:
-        return err("ELEMENT_NOT_FOUND", xpath)
+        # We pass all 3 to CDP. The 'Smart Driver' handles the fallback internally.
+        cdp.click(xpath, label, role)
+        return ok(message=f"Clicked {xpath or label}")
     except Exception as e:
         return err("CLICK_FAILED", str(e))
 
 @app.tool()
-async def type_into(xpath: str, value: str):
+async def type_into(value: str, xpath: str = None, label: str = None, role: str = None):
+    """
+    Types text into an input field.
+    Args:
+        value: The text to type.
+        xpath: The strict XPath (Preferred).
+        label: Visual label of the input (Fallback).
+        role: Type of element e.g. 'editable text' (Fallback).
+    """
     try:
-        cdp.fill(xpath, value)
-        return ok()
-    except TimeoutError:
-        return err("ELEMENT_NOT_FOUND", xpath)
-
-@app.tool()
-async def hover(xpath: str):
-    try:
-        cdp.hover(xpath)
-        return ok()
-    except TimeoutError:
-        return err("ELEMENT_NOT_FOUND", xpath)
-
-@app.tool()
-async def press_key(key: str):
-    cdp.press_key(key)
-    return ok()
+        cdp.fill(xpath, value, label, role)
+        return ok(message=f"Typed '{value}' into {xpath or label}")
+    except Exception as e:
+        return err("TYPE_FAILED", str(e))
 
 @app.tool()
 async def send_keys(keys: str, xpath: str = None):
     """
-    Send special keys or shortcuts (e.g. 'Enter', 'Tab', 'Ctrl+A').
-    If xpath is provided, focuses that element before sending.
+    Sends special keys (Enter, Tab, etc.).
     """
     try:
         cdp.send_keys(keys, xpath)
-        return {"status": "OK"}
+        return ok(message=f"Sent keys: {keys}")
     except Exception as e:
-        return err("KEY_ERROR", str(e))
+        return err("KEY_FAILED", str(e))
 
 @app.tool()
-async def double_click(xpath: str):
+async def get_text(xpath: str):
+    """Gets the visible text of an element."""
+    try:
+        text = cdp.get_text(xpath)
+        return ok(data={"text": text})
+    except Exception as e:
+        return err("GET_TEXT_FAILED", str(e))
+
+@app.tool()
+async def find_element(query: str):
     """
-    Double-click an element. Useful for selecting text or special UI actions.
+    Finds elements by visible text or attribute.
+    Returns a list of potential matches with XPaths.
     """
     try:
-        cdp.double_click(xpath)
-        return ok()
+        elements = cdp.find_elements_by_text(query)
+        return ok(data=elements)
+    except Exception as e:
+        return err("FIND_FAILED", str(e))
+
+@app.tool()
+async def find_smart_locator(label: str, role: str):
+    """
+    Diagnostic Tool: Returns the active XPath that matches the Label and Role.
+    Use this to 'Heal' your CSV by finding the new XPath for a broken field.
+    """
+    try:
+        xpath = await _attempt_fallback(label, role)
+        if xpath:
+            return ok(data=xpath, message=f"Found match: {xpath}")
+        return err("NOT_FOUND", f"No match found for Label='{label}', Role='{role}'")
+    except Exception as e:
+        return err("SMART_FIND_FAILED", str(e))
+
+@app.tool()
+async def discover_interactive_elements(tag_name: str = "button"):
+    """
+    Returns a list of all interactive elements of a specific type.
+    Useful for exploring a new page.
+    """
+    try:
+        elements = cdp.get_all_interactive_elements(tag_name)
+        return ok(data=elements)
+    except Exception as e:
+        return err("DISCOVERY_FAILED", str(e))
+
+@app.tool()
+async def scrape_table(table_xpath: str, next_page_xpath: str = None, max_pages: int = 0, total_pages_xpath: str = None):
+    """
+    Scrapes a table across multiple pages.
+    """
+    try:
+        data = cdp.scrape_table(table_xpath, next_page_xpath, max_pages, total_pages_xpath)
+        return ok(data=data, message=f"Scraped {len(data)} rows")
+    except Exception as e:
+        return err("SCRAPE_FAILED", str(e))
+
+@app.tool()
+async def hover(xpath: str = None, label: str = None, role: str = None):
+    """Hovers over an element."""
+    try:
+        cdp.hover(xpath, label, role)
+        return ok(message="Hovered successfully")
+    except Exception as e:
+        return err("HOVER_FAILED", str(e))
+
+@app.tool()
+async def double_click(xpath: str = None, label: str = None, role: str = None):
+    """Double clicks an element."""
+    try:
+        cdp.double_click(xpath, label, role)
+        return ok(message="Double-clicked successfully")
     except Exception as e:
         return err("DOUBLE_CLICK_FAILED", str(e))
 
 @app.tool()
-async def drag_and_drop(source_xpath: str, target_xpath: str):
-    """
-    Drag an element from source_xpath and drop it at target_xpath.
-    """
+async def select_option(xpath: str, value: str = None, label: str = None):
+    """Selects an option from a dropdown."""
     try:
-        cdp.drag_and_drop(source_xpath, target_xpath)
-        return ok()
+        cdp.select_option(xpath, value=value, label=label)
+        return ok(message="Option selected")
     except Exception as e:
-        return err("DRAG_FAILED", str(e))
+        return err("SELECT_FAILED", str(e))
 
-@app.tool()
-async def type_like_human(xpath: str, value: str):
-    """
-    Types text character-by-character into the field.
-    
-    IMPORTANT:
-    - This tool DOES NOT clear the field first. It appends to existing text.
-    - Use this for "Type-ahead" fields, appending text, or when 'type_into' fails.
-    - If you need to clear the field first, use 'send_keys' with Ctrl+A -> Backspace.
-    """
-    try:
-        cdp.type_human(xpath, value)
-        return ok()
-    except Exception as e:
-        return err("HUMAN_TYPE_FAILED", str(e))
-
-# ---------------- Discovery tool ----------------
-
-@app.tool()
-async def find_element(fieldName: str):
-    """
-    Smart Search: Finds visible elements (buttons, inputs, links) where text/id/name 
-    matches the search query (fieldName).
-    """
-    try:
-        # Delegate the heavy lifting to the client
-        matches = cdp.find_elements_by_text(fieldName)
-        
-        if len(matches) == 1:
-            return ok(xpath=matches[0]["xpath"])
-            
-        if not matches:
-            return err("NOT_FOUND", f"No visible element found matching '{fieldName}'")
-            
-        # Ambiguous Matches (Let LLM decide)
-        return {
-            "status": "NEEDS_LLM",
-            "message": f"Found {len(matches)} candidates for '{fieldName}'. Please select one.",
-            "candidates": matches[:10] 
-        }
-    except Exception as e:
-        return err("SEARCH_FAILED", str(e))
-
-@app.tool()
-async def get_interactive_elements(tag_name: str = "button"):
-    """
-    Discovery Tool: Returns a list of ALL visible elements of a specific type.
-    tag_name options: 'button', 'input', 'a', 'select', 'textarea'
-    """
-    try:
-        # Delegate to client
-        items = cdp.get_all_interactive_elements(tag_name)
-        return ok(count=len(items), elements=items[:50])
-    except Exception as e:
-        return err("DISCOVERY_FAILED", str(e))
-
-# ---------------- Wait tools ----------------
-@app.tool()
-async def wait_for_element(xpath: str, timeout_ms: int = DEFAULT_TIMEOUT):
-    try:
-        cdp.wait_for_element(xpath, timeout_ms)
-        return ok()
-    except TimeoutError as e:
-        return err("TIMEOUT", str(e))
-
-@app.tool()
-async def wait_for_network_idle(timeout_ms: int = DEFAULT_TIMEOUT):
-    try:
-        cdp.wait_for_network_idle(timeout_ms)
-        return ok()
-    except TimeoutError as e:
-        return err("TIMEOUT", str(e))
-    
-@app.tool()
-async def wait_for_text(text: str, timeout_ms: int = DEFAULT_TIMEOUT):
-    try:
-        cdp.wait_for_text(text, timeout_ms)
-        return {"status": "OK"}
-    except TimeoutError as e:
-        return {
-            "status": "ERROR",
-            "error_code": "TIMEOUT",
-            "message": str(e)
-        }
-
-@app.tool()
-async def scroll_to_element(xpath: str):
-    try:
-        if cdp.scroll_into_view(xpath):
-            return {"status": "OK"}
-        return {"status": "ERROR", "error_code": "NOT_FOUND"}
-    except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
-
-
-@app.tool()
-async def screenshot(full_page: bool = True):
-    """
-    Take a screenshot of the current page.
-    Returns base64 PNG.
-    """
-    try:
-        img = cdp.screenshot(full_page=full_page)
-        return {
-            "status": "OK",
-            "image_base64": base64.b64encode(img).decode("utf-8")
-        }
-    except Exception as e:
-        return {
-            "status": "ERROR",
-            "error_code": "SCREENSHOT_FAILED",
-            "message": str(e)
-        }
-
-
-@app.tool()
-async def is_checked(xpath: str):
-    return {
-        "status": "OK",
-        "checked": cdp.is_checked(xpath)
-    }
-
-@app.tool()
-async def is_selected(xpath: str):
-    return {
-        "status": "OK",
-        "selected": cdp.is_selected(xpath)
-    }
-
-
-@app.tool()
-async def select_dropdown(
-    xpath: str,
-    value: str | None = None,
-    label: str | None = None,
-    index: int | None = None
-):
-    try:
-        cdp.select_option(xpath, value=value, label=label, index=index)
-        return {"status": "OK"}
-    except Exception as e:
-        return {
-            "status": "ERROR",
-            "error_code": "SELECT_FAILED",
-            "message": str(e)
-        }
-
-@app.tool()
-async def multi_select_dropdown(xpath: str, values: list[str]):
-    try:
-        cdp.multi_select(xpath, values)
-        return {"status": "OK"}
-    except Exception as e:
-        return {
-            "status": "ERROR",
-            "error_code": "MULTI_SELECT_FAILED",
-            "message": str(e)
-        }
-
-@app.tool()
-async def select_custom_dropdown(trigger_xpath: str, option_text: str):
-    """
-    Selects an item from a modern UI dropdown (React/Vue/Angular/MUI).
-    Use this when standard 'select_dropdown' fails.
-    
-    Args:
-        trigger_xpath: The XPath of the input/div you click to open the list.
-        option_text: The visible text of the option you want to choose.
-    """
-    try:
-        cdp.select_custom_option(trigger_xpath, option_text)
-        return ok()
-    except Exception as e:
-        return err("CUSTOM_SELECT_FAILED", str(e))
-    
-@app.tool()
-async def select_autocomplete(input_xpath: str, select_text: str):
-    """
-    Selects from a 'Type-to-Filter' dropdown.
-    1. Focuses the input (input_xpath).
-    2. Types 'select_text' character by character.
-    3. Clicks 'select_text' as soon as it appears in the list.
-    """
-    try:
-        cdp.select_autocomplete_option(input_xpath, select_text)
-        return ok()
-    except Exception as e:
-        return err("AUTOCOMPLETE_FAILED", str(e))
-
-# ---------------- Tab Management Tool ----------------
+# --- NEW TOOLS FOR TABS & FRAMES ---
 
 @app.tool()
 async def switch_tab(keyword: str = None, new_tab: bool = False):
     """
     Switches the browser focus to a different tab.
-    
     Args:
-        keyword: (Optional) A word to look for in the tab's Title or URL (e.g. "Report", "Google").
-        new_tab: (Optional) If True, switches to the NEWEST tab (index -1). 
-                 Use this immediately after clicking a link that opens a new window.
+        keyword: (Optional) A word to look for in the tab's Title or URL.
+        new_tab: (Optional) If True, switches to the NEWEST tab (index -1).
     """
     try:
         if new_tab:
@@ -313,66 +242,34 @@ async def switch_tab(keyword: str = None, new_tab: bool = False):
             cdp.switch_to_tab(keyword=keyword)
         else:
             return err("INVALID_ARGS", "Must provide either 'keyword' or 'new_tab=True'")
-            
         return ok(message="Switched tab successfully")
     except Exception as e:
         return err("SWITCH_FAILED", str(e))
 
-# ---------------- Extraction tools ----------------
-@app.tool()
-async def get_text(xpath: str):
-    """
-    Get the visible text or value from any element (label, input, div, span, etc).
-    Use this to read data from the screen.
-    """
-    try:
-        text = cdp.get_text(xpath)
-        return ok(text=text)
-    except Exception as e:
-        return err("GET_TEXT_FAILED", str(e))
-
-@app.tool()
-async def get_table_data(
-    table_xpath: str, 
-    next_page_xpath: str = None, 
-    max_pages: int = 0,
-    total_pages_xpath: str = None
-):
-    """
-    Extract data from a table (with optional pagination).
-    
-    Args:
-        table_xpath: XPath to the <table> (or container).
-        next_page_xpath: (Optional) XPath to the 'Next' button.
-        max_pages: (Optional) Exact number of pages to scrape (e.g., 5).
-        total_pages_xpath: (Optional) XPath to a label like "Page 1 of 10". 
-                           Use this to automatically determine how many pages to scrape.
-    """
-    try:
-        data = cdp.scrape_table(table_xpath, next_page_xpath, max_pages, total_pages_xpath)
-        return ok(count=len(data), data=data)
-    except Exception as e:
-        return err("TABLE_SCRAPE_FAILED", str(e))
-    
-
-# ---------------- IFrame tools ----------------
 @app.tool()
 async def get_frames():
     """
     Returns a list of all named iframes on the current page.
     Useful when you cannot find an element that should be there.
     """
-    return cdp.get_frames()
+    try:
+        frames = cdp.get_frames()
+        return ok(data=frames)
+    except Exception as e:
+        return err("GET_FRAMES_FAILED", str(e))
 
 @app.tool()
 async def switch_frame(frame_name: str = None):
     """
     Switches the automation context to a specific iframe.
     Pass None to return to the main (top-level) page.
-    Use get_frames() first to see available names.
     """
     try:
         cdp.switch_frame(frame_name)
-        return f"Switched focus to frame: {frame_name if frame_name else 'Top Level'}"
+        return ok(message=f"Switched focus to frame: {frame_name if frame_name else 'Top Level'}")
     except Exception as e:
-        return f"Error switching frame: {e}"
+        return err("SWITCH_FRAME_FAILED", str(e))
+
+# Run Server
+if __name__ == "__main__":
+    app.run()
