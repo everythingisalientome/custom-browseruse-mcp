@@ -112,6 +112,10 @@ class ChromeCDP:
         self._inflight_requests = 0 #rack in-flight requests
         self.tracer = TraceManager(enabled=TRACE_ENABLED)
         self.input_ready = False # To track if Input domain is enabled
+        # for tracking iframes
+        self.context_map = {}  # Stores {"frame_name": context_id}
+        self.current_context_id = None # None = Top Page
+        # -----------------------
         self._clean_old_profiles() #Cleanup stale profiles
         self.user_data_dir = tempfile.mkdtemp(prefix="cdp-profile-", dir=USER_DATA_DIR)#Create a fresh user data dir for this session
 
@@ -317,7 +321,17 @@ class ChromeCDP:
             self.ws.send(json.dumps(payload))
             return msg_id
 
-    def _handle_event(self, msg):
+    def _handle_event(self, msg):        
+        # --- IFrames: Listen for new frames/contexts appearing ---
+        if msg.get("method") == "Runtime.executionContextCreated":
+            ctx = msg["params"]["context"]
+            # Store frame ID by name (e.g., "gsft_main")
+            name = ctx.get("name")
+            if name:
+                with self._lock:
+                    self.context_map[name] = ctx["id"]
+        # ----------------------
+
         if msg.get("method") in (
             "Network.requestWillBeSent",
             "Network.responseReceived",
@@ -450,11 +464,27 @@ class ChromeCDP:
         }})()
         """
 
+        # IFrame change: Ensure we poll for visibility inside the current frame.
+        #while time.monotonic() < deadline:
+        #    msg_id = self._send("Runtime.evaluate", {"expression": expr})
+        #    if self._recv(msg_id)["result"]["result"]["value"]:
+        #        return True
+        #    time.sleep(STEP_DELAY)
         while time.monotonic() < deadline:
-            msg_id = self._send("Runtime.evaluate", {"expression": expr})
+            # 1. Build params dynamically
+            params = {"expression": expr}
+            
+            # 2. Inject Context ID if set
+            if self.current_context_id:
+                params["contextId"] = self.current_context_id
+            
+            # 3. Send command
+            msg_id = self._send("Runtime.evaluate", params)
+            
             if self._recv(msg_id)["result"]["result"]["value"]:
                 return True
             time.sleep(STEP_DELAY)
+        #------ End IFrame change ------
 
         self._save_debug_screenshot("wait_for_element_failed")
         raise TimeoutError(f"Element not visible: {xpath}")
@@ -588,7 +618,15 @@ class ChromeCDP:
         """
 
         while time.monotonic() < deadline:
-            msg_id = self._send("Runtime.evaluate", {"expression": expr})
+            #-- Iframe support --
+            #msg_id = self._send("Runtime.evaluate", {"expression": expr})
+            params = {"expression": expr}
+            if self.current_context_id:
+                params["contextId"] = self.current_context_id
+            
+            msg_id = self._send("Runtime.evaluate", params)
+            #--------------------
+            
             result = self._recv(msg_id)["result"]["result"]
 
             if result.get("value") is True:
@@ -1898,10 +1936,24 @@ class ChromeCDP:
             return null;
         }})()
         """
-        msg_id = self._send("Runtime.evaluate", {
+        # Iframe support: Ensure we search for elements inside the current frame.
+        #msg_id = self._send("Runtime.evaluate", {
+        #    "expression": expr, 
+        #    "returnByValue": False  # CRITICAL: Returns pointer, not data
+        #})
+        # 1. Define the base parameters
+        params = {
             "expression": expr, 
             "returnByValue": False  # CRITICAL: Returns pointer, not data
-        })
+        }
+        
+        # 2. IF we are currently "switched" to a frame, tell Chrome to run this there
+        if self.current_context_id:
+            params["contextId"] = self.current_context_id
+
+        # 3. Send the dynamic parameters
+        msg_id = self._send("Runtime.evaluate", params)
+        # ------------
         result = self._recv(msg_id)
         
         remote_obj = result["result"]["result"]
@@ -2013,7 +2065,15 @@ class ChromeCDP:
         """
         
         # Send command
-        msg_id = self._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
+        #-- IFrame support: Ensure we search inside the current frame
+        #msg_id = self._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
+        params = {"expression": js_script, "returnByValue": True}
+        if self.current_context_id:
+            params["contextId"] = self.current_context_id
+            
+        msg_id = self._send("Runtime.evaluate", params)
+        #-- END ----
+
         response = self._recv(msg_id)
 
         # --- ROBUST RESULT EXTRACTION ---
@@ -2073,7 +2133,15 @@ class ChromeCDP:
             return results;
         }})()
         """
-        msg_id = self._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
+        # IFrame support
+        #msg_id = self._send("Runtime.evaluate", {"expression": js_script, "returnByValue": True})
+        params = {"expression": js_script, "returnByValue": True}
+        if self.current_context_id:
+            params["contextId"] = self.current_context_id
+            
+        msg_id = self._send("Runtime.evaluate", params)
+        # -----------
+
         response = self._recv(msg_id)
 
         # Robust Extraction
@@ -2191,3 +2259,25 @@ class ChromeCDP:
                     pass
         except Exception:
             pass
+
+    # ---------------- IFrame Management ----------------
+    def get_frames(self):
+        """Returns a list of available frame names (e.g. 'gsft_main')."""
+        return list(self.context_map.keys())
+
+    def switch_frame(self, frame_name: str = None):
+        """
+        Switches context to a specific frame. 
+        Pass None to return to the main top-level page.
+        """
+        if not frame_name:
+            self.current_context_id = None
+            print("Switched to Top-Level Page")
+            return
+
+        if frame_name not in self.context_map:
+            # Refresh map in case it loaded late
+            raise RuntimeError(f"Frame '{frame_name}' not found. Available: {list(self.context_map.keys())}")
+            
+        self.current_context_id = self.context_map[frame_name]
+        print(f"Switched to Frame: {frame_name} (ID: {self.current_context_id})")

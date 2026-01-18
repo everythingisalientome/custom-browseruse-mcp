@@ -353,3 +353,26 @@ async def get_table_data(
         return ok(count=len(data), data=data)
     except Exception as e:
         return err("TABLE_SCRAPE_FAILED", str(e))
+    
+
+# ---------------- IFrame tools ----------------
+@app.tool()
+async def get_frames():
+    """
+    Returns a list of all named iframes on the current page.
+    Useful when you cannot find an element that should be there.
+    """
+    return cdp.get_frames()
+
+@app.tool()
+async def switch_frame(frame_name: str = None):
+    """
+    Switches the automation context to a specific iframe.
+    Pass None to return to the main (top-level) page.
+    Use get_frames() first to see available names.
+    """
+    try:
+        cdp.switch_frame(frame_name)
+        return f"Switched focus to frame: {frame_name if frame_name else 'Top Level'}"
+    except Exception as e:
+        return f"Error switching frame: {e}"
