@@ -1086,7 +1086,7 @@ class ChromeCDP:
             "role": role.lower().strip() if role else ""
         })
 
-        # UPDATED: SHADOW DOM AWARE RESOLVER
+        # UPDATED: AGGRESSIVE SHADOW WALKER
         expr = f"""
         (function() {{
             const params = {js_params};
@@ -1099,7 +1099,7 @@ class ChromeCDP:
                         style.opacity !== '0');
             }}
 
-            // --- STRATEGY 1: XPATH ---
+            // --- STRATEGY 1: XPATH (The Sniper) ---
             if (params.xpath) {{
                 try {{
                     const snapshot = document.evaluate(params.xpath, document, null,
@@ -1114,37 +1114,40 @@ class ChromeCDP:
                 }}
             }}
 
-            // --- STRATEGY 2: LABEL + ROLE ---
+            // --- STRATEGY 2: LABEL + ROLE (The Detective) ---
             if (!params.label) return null;
 
             let bestEl = null;
             let bestScore = -1;
             
-            // Recursive Queue to Pierce Shadow Roots
+            // Queue starts with the main document
             const queue = [document];
             
             while (queue.length > 0) {{
                 const root = queue.shift();
                 
-                // Select candidates in this scope (include generic containers for broad match)
-                const candidates = root.querySelectorAll(
-                    'input, button, a, select, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="combobox"], [role="option"], label, div, span'
-                );
+                // CRITICAL FIX: Select ALL elements to ensure we capture every Shadow Host
+                const allNodes = root.querySelectorAll('*');
 
-                for (const el of candidates) {{
-                    // Add nested shadow roots to queue
+                for (const el of allNodes) {{
+                    // 1. Add Nested Shadow Roots to Queue (The "Gatekeeper" Fix)
                     if (el.shadowRoot) queue.push(el.shadowRoot);
                     
-                    if (!isVisible(el)) continue;
-
-                    // 1. Text Matching
+                    // 2. Filter: Is this an element we care about?
+                    // We only score it if it matches our "Interactive" criteria OR has the text we want
+                    const tag = el.tagName.toLowerCase();
+                    const elRole = (el.getAttribute('role') || '').toLowerCase();
                     const text = (el.innerText || el.value || el.getAttribute('placeholder') || el.getAttribute('aria-label') || '').toLowerCase().trim();
                     const title = (el.getAttribute('title') || '').toLowerCase();
-                    
-                    // Optimization: Skip if no text overlap (unless empty generic match required)
+
+                    // Optimization: If it's invisible, skip scoring
+                    if (!isVisible(el)) continue;
+
+                    // 3. Text Matching Check (Must match to even be considered)
+                    // We check text content, value, placeholder, aria-label, and title
                     if (!text.includes(params.label) && !title.includes(params.label)) continue;
 
-                    // 2. Scoring System
+                    // 4. Scoring System
                     let score = 0;
 
                     // A. Text Precision
@@ -1152,25 +1155,30 @@ class ChromeCDP:
                     else if (text.startsWith(params.label)) score += 50; 
                     else score += 10;                                    
 
-                    // B. Role Matching (If provided)
+                    // B. Role Matching (Relaxed for ServiceNow)
                     if (params.role) {{
-                        const tag = el.tagName.toLowerCase();
-                        const elRole = (el.getAttribute('role') || '').toLowerCase();
                         const elType = (el.getAttribute('type') || '').toLowerCase();
                         let roleMatch = false;
 
                         if (params.role.includes('button') && (tag === 'button' || elType === 'submit' || elRole === 'button')) roleMatch = true;
                         if (params.role.includes('link') && (tag === 'a' || elRole === 'link')) roleMatch = true;
                         if ((params.role.includes('text') || params.role.includes('edit')) && (tag === 'input' || tag === 'textarea')) roleMatch = true;
-                        if (params.role.includes('combo') && (tag === 'select' || elRole === 'combobox')) roleMatch = true;
+                        
+                        // FIX: ServiceNow often implements combos as inputs. Allow input for 'combo' role.
+                        if (params.role.includes('combo') && (tag === 'select' || elRole === 'combobox' || tag === 'input')) roleMatch = true;
+                        
                         if (params.role.includes('check') && (elType === 'checkbox' || elRole === 'checkbox')) roleMatch = true;
 
                         if (roleMatch) score += 50;
                         else score -= 20; 
                     }}
 
-                    // C. Penalize "Containers" (e.g. div vs inner button)
-                    if (text.length > params.label.length + 100) score -= 50;
+                    // C. Preference Logic
+                    // Prefer Inputs/Buttons over generic divs even if text matches
+                    if (['input', 'button', 'select', 'textarea', 'a'].includes(tag)) score += 20;
+                    
+                    // Penalize huge containers (e.g. the whole form div that contains the word "Search")
+                    if (text.length > params.label.length + 50) score -= 50;
 
                     if (score > bestScore) {{
                         bestScore = score;
