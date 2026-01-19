@@ -1280,17 +1280,26 @@ class ChromeCDP:
     def _get_object_id(self, xpath: str = None, label: str = None, role: str = None):
         """
         Universal Resolver (Global Frame Search):
-        1. Checks the current frame first (Fastest).
-        2. If not found, ITERATES through all other available frames (Deep Scan).
-        3. If found in a different frame, AUTO-SWITCHES context to that frame.
+        1. SYNC: Flushes pending browser events to discover new frames.
+        2. Checks the current frame first.
+        3. If not found, ITERATES through all other available frames (Deep Scan).
+        4. If found in a different frame, AUTO-SWITCHES context.
         """
+        # --- CRITICAL FIX: Sync Contexts ---
+        # We send a dummy command to force the _recv loop to process
+        # any pending "Execution Context Created" events from the buffer.
+        try:
+            self._recv(self._send("Runtime.enable"))
+        except Exception:
+            pass
+        # -----------------------------------
+
         js_params = json.dumps({
             "xpath": xpath,
             "label": label.lower().strip() if label else "",
             "role": role.lower().strip() if role else ""
         })
 
-        # The detection script (Same logic as before, just packaged for reuse)
         detection_script = f"""
         (function() {{
             const params = {js_params};
@@ -1416,8 +1425,8 @@ class ChromeCDP:
         # Always start with the current context (fastest)
         contexts_to_check = [self.current_context_id]
         
-        # Add all other known contexts to the list (in case it's not in the current one)
-        # We filter out the current one to avoid double checking
+        # Add all other known contexts to the list
+        # Since we synced at the start, context_map is now fresh!
         other_contexts = [ctx_id for ctx_id in self.context_map.values() if ctx_id != self.current_context_id]
         contexts_to_check.extend(other_contexts)
         
@@ -1438,9 +1447,8 @@ class ChromeCDP:
                     # Auto-Switch Context (The "Sticky" Logic)
                     if ctx_id != self.current_context_id:
                         self.current_context_id = ctx_id
-                        # Optional: Print debug info so you know it happened
-                        # frame_name = next((k for k, v in self.context_map.items() if v == ctx_id), "unknown")
-                        # print(f"Auto-switched to frame: {frame_name}")
+                        frame_name = next((k for k, v in self.context_map.items() if v == ctx_id), "unknown")
+                        print(f"DEBUG: Auto-switched to frame: {frame_name}")
                         
                     return remote_obj["objectId"]
                     
