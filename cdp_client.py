@@ -1285,25 +1285,17 @@ class ChromeCDP:
     def _get_object_id(self, xpath: str = None, label: str = None, role: str = None):
         """
         Universal Resolver (Global Frame Search):
-        1. REFRESH: Forces Chrome to resend all frame contexts immediately.
+        1. REFRESH: Forces Chrome to resend all frame contexts.
         2. CHECKS: Scans current frame first, then ALL other frames.
         3. AUTO-SWITCH: Locks onto the correct frame if found.
         """
-        # --- CRITICAL FIX: HARD REFRESH CONTEXTS ---
-        # 1. Disable Runtime to clear the internal state
+        # 1. HARD REFRESH CONTEXTS
         try: self._send("Runtime.disable")
         except: pass
-        
-        # 2. Enable Runtime to FORCE Chrome to resend 'executionContextCreated' for all frames
-        # We perform a blocking receive here to ensure we catch them all.
         try:
             msg_id = self._send("Runtime.enable")
             self._recv(msg_id) 
-            # Note: The _recv loop above will catch the "Created" events 
-            # and populate self.context_map automatically.
-        except Exception:
-            pass
-        # -------------------------------------------
+        except Exception: pass
 
         js_params = json.dumps({
             "xpath": xpath,
@@ -1316,14 +1308,13 @@ class ChromeCDP:
             const params = {js_params};
             
             function isVisible(el) {{
-                const rect = el.getBoundingClientRect();
+                // RELAXED CHECK: Trust style over geometry. 
                 const style = window.getComputedStyle(el);
-                const isGeometryVisible = (rect.width > 0 && rect.height > 0) || (style.overflow !== 'hidden');
                 const isStyleVisible = style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
-                return isGeometryVisible && isStyleVisible;
+                return isStyleVisible;
             }}
 
-            // --- STRATEGY 1: XPATH (Light DOM) ---
+            // --- STRATEGY 1: XPATH ---
             if (params.xpath) {{
                 try {{
                     const snapshot = document.evaluate(params.xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
@@ -1334,7 +1325,7 @@ class ChromeCDP:
                 }} catch (e) {{ }}
             }}
 
-            // --- STRATEGY 1.5: DEEP XPATH (Shadow DOM) ---
+            // --- STRATEGY 1.5: DEEP SHADOW XPATH ---
             if (params.xpath) {{
                  const isSimpleId = params.xpath.includes("@id=") || params.xpath.startsWith("//input") || params.xpath.startsWith("//button");
                  if (isSimpleId) {{
@@ -1391,17 +1382,33 @@ class ChromeCDP:
 
                     const tag = el.tagName.toLowerCase();
                     
-                    let directText = (el.innerText || '').toLowerCase();
-                    let valueText = (el.value || '').toLowerCase();
-                    let attrText = (el.getAttribute('placeholder') || el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('name') || '').toLowerCase();
-                    let labelText = getAssociatedLabelText(el); 
-
-                    const fullSignature = [directText, valueText, attrText, labelText].join(" ");
+                    // --- FIX: CHECK ALL ATTRIBUTES (The "Net") ---
+                    // We combine every possible identifier into one string to ensure we don't miss a match.
+                    const attrSources = [
+                        el.getAttribute('placeholder'),
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('name'),
+                        el.getAttribute('title'),
+                        el.id, // Critical: Check the ID too
+                        (el.innerText || ''),
+                        (el.value || '')
+                    ];
+                    
+                    const fullSignature = attrSources
+                        .map(val => (val || '').toLowerCase())
+                        .join(" ") + " " + getAssociatedLabelText(el);
+                        
                     if (!fullSignature.includes(params.label)) continue;
 
                     let score = 0;
-                    if (attrText === params.label || labelText.trim() === params.label) score += 100;
-                    else if (fullSignature.includes(params.label)) score += 50;
+                    
+                    // Exact match on key attributes gets priority
+                    const specificAttrs = [el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.getAttribute('name')];
+                    if (specificAttrs.some(attr => (attr || '').toLowerCase() === params.label)) {{
+                        score += 100;
+                    }} else {{
+                        score += 50; 
+                    }}
 
                     if (params.role) {{
                         const elRole = (el.getAttribute('role') || '').toLowerCase();
@@ -1430,36 +1437,38 @@ class ChromeCDP:
         }})()
         """
 
-        # --- EXECUTION LOGIC (Global Search) ---
-        
-        # 1. Define the contexts to check
+        # 2. DEFINE CONTEXTS
         contexts_to_check = [self.current_context_id]
-        
-        # Add all other known contexts (Now populated correctly!)
         other_contexts = [ctx_id for ctx_id in self.context_map.values() if ctx_id != self.current_context_id]
         contexts_to_check.extend(other_contexts)
         
-        # 2. Iterate and Scan
+        # 3. SCAN LOOP WITH URL DEBUGGING
         for ctx_id in contexts_to_check:
-            params = { "expression": detection_script, "returnByValue": False }
-            if ctx_id: params["contextId"] = ctx_id
+            if not ctx_id: continue
+            
+            # Debug: Check URL of the frame we are scanning
+            try:
+                url_expr = "window.location.href"
+                url_msg = self._send("Runtime.evaluate", {"expression": url_expr, "contextId": ctx_id})
+                url_res = self._recv(url_msg)
+                frame_url = url_res.get("result", {}).get("result", {}).get("value", "unknown")
+                # Print last 50 chars of URL to identify the frame (e.g. ".../incident.do...")
+                print(f"DEBUG: Scanning Frame ID {ctx_id} | URL: ...{frame_url[-50:]}") 
+            except:
+                pass
+
+            params = { "expression": detection_script, "returnByValue": False, "contextId": ctx_id }
             
             try:
                 msg_id = self._send("Runtime.evaluate", params)
                 result = self._recv(msg_id)
                 remote_obj = result.get("result", {}).get("result", {})
                 
-                # Check if we found a valid object
                 if remote_obj.get("subtype") != "null" and "objectId" in remote_obj:
-                    # MATCH FOUND!
                     if ctx_id != self.current_context_id:
                         self.current_context_id = ctx_id
-                        # Optional: Print frame switch for debugging
-                        frame_name = next((k for k, v in self.context_map.items() if v == ctx_id), "unknown")
-                        print(f"DEBUG: Found element in frame '{frame_name}'. Auto-switching context.")
-                        
+                        print(f"DEBUG: Found element in Frame {ctx_id}. Auto-switching context.")
                     return remote_obj["objectId"]
-                    
             except Exception:
                 continue
 
