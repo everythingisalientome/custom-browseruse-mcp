@@ -86,7 +86,7 @@ PROXIES = {
     "https": HTTPS_PROXY
 }
 
-# EXTENDED KEY MAP (Includes F-Keys and Nav)
+# Format: "KeyName": ("key_value", "code_value", windows_virtual_key_code)
 KEY_MAP = {
     "Enter": ("Enter", "Enter", 13),
     "Tab": ("Tab", "Tab", 9),
@@ -103,18 +103,11 @@ KEY_MAP = {
     "ArrowDown": ("ArrowDown", "ArrowDown", 40),
     "ArrowLeft": ("ArrowLeft", "ArrowLeft", 37),
     "ArrowRight": ("ArrowRight", "ArrowRight", 39),
-    "F1": ("F1", "F1", 112),
-    "F2": ("F2", "F2", 113),
-    "F3": ("F3", "F3", 114),
-    "F4": ("F4", "F4", 115),
-    "F5": ("F5", "F5", 116),
-    "F6": ("F6", "F6", 117),
-    "F7": ("F7", "F7", 118),
-    "F8": ("F8", "F8", 119),
-    "F9": ("F9", "F9", 120),
-    "F10": ("F10", "F10", 121),
-    "F11": ("F11", "F11", 122),
-    "F12": ("F12", "F12", 123),
+    # F-Keys
+    "F1": ("F1", "F1", 112), "F2": ("F2", "F2", 113), "F3": ("F3", "F3", 114),
+    "F4": ("F4", "F4", 115), "F5": ("F5", "F5", 116), "F6": ("F6", "F6", 117),
+    "F7": ("F7", "F7", 118), "F8": ("F8", "F8", 119), "F9": ("F9", "F9", 120),
+    "F10": ("F10", "F10", 121), "F11": ("F11", "F11", 122), "F12": ("F12", "F12", 123),
 }
 
 class ChromeCDP:
@@ -145,7 +138,7 @@ class ChromeCDP:
             img_data = self.screenshot(full_page=True)
             with open(filename, "wb") as f:
                 f.write(img_data)
-            print(f"📸 Captured error screenshot: {filename}")
+            print(f"Captured error screenshot: {filename}")
         except Exception as e:
             print(f"Failed to capture error screenshot: {e}")
 
@@ -370,21 +363,13 @@ class ChromeCDP:
         msg_id = self._send("Runtime.evaluate", {"expression": "document.documentElement.outerHTML"})
         return self._recv(msg_id)["result"]["result"]["value"]
 
-    def screenshot(self, full_page=True):
-        """Returns PNG bytes"""
-        params = {"format": "png", "captureBeyondViewport": True} if full_page else {"format": "png"}
-        msg_id = self._send("Page.captureScreenshot", params)
-        res = self._recv(msg_id)
-        if "data" in res.get("result", {}):
-            return base64.b64decode(res["result"]["data"])
-        return b""
-
     # ---------------- Wait helpers ----------------
     def wait_for_element(self, xpath: str = None, label: str = None, role: str = None, timeout_ms=DEFAULT_TIMEOUT):
         self.wait_for_dom_stable(timeout_ms)
         deadline = time.monotonic() + timeout_ms / 1000
         
         while time.monotonic() < deadline:
+            # We reuse the "Detective" logic. If it returns an ID, the element is found AND visible.
             if self._get_object_id(xpath, label, role):
                 return True
             time.sleep(STEP_DELAY)
@@ -431,6 +416,7 @@ class ChromeCDP:
         raise TimeoutError("Network did not become idle")
 
     def wait_for_text(self, text: str, timeout_ms: int = DEFAULT_TIMEOUT):
+        # UPDATED: SHADOW DOM AWARE TEXT WAITER
         deadline = time.monotonic() + timeout_ms / 1000
         js_params = json.dumps(text)
         expr = f"""
@@ -441,6 +427,7 @@ class ChromeCDP:
                 const root = queue.shift();
                 if (!root) continue;
                 
+                // 1. Check direct text content via TreeWalker
                 const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
                 while (walker.nextNode()) {{
                     const node = walker.currentNode;
@@ -453,6 +440,7 @@ class ChromeCDP:
                     }}
                 }}
 
+                // 2. Add Shadow Roots to Queue
                 const shadowCandidates = root.querySelectorAll('*');
                 for (const el of shadowCandidates) {{
                      if (el.shadowRoot) queue.push(el.shadowRoot);
@@ -484,6 +472,8 @@ class ChromeCDP:
 
     def hover(self, xpath: str = None, label: str = None, role: str = None, timeout_ms=DEFAULT_TIMEOUT):
         self._ensure_page_actionable(timeout_ms=timeout_ms)
+        
+        # Resolve ID (Use Smart Logic)
         obj_id = self._get_object_id(xpath, label, role)
         if not obj_id: raise RuntimeError(f"Hover failed; ID retrieval failed for {xpath or label}")
 
@@ -557,9 +547,10 @@ class ChromeCDP:
             while time.monotonic() < deadline:
                 try:
                     self._ensure_page_actionable(timeout_ms=PAGE_LOAD_TIMEOUT)
+                    # Note: We rely on _get_object_id's internal wait/check, but can add explicit wait if xpath is present
                     if xpath:
-                         try: self.wait_for_element(xpath, timeout_ms=DEFAULT_TIMEOUT)
-                         except: pass 
+                         try: self.wait_for_element(xpath=xpath, label=label,role=role ,timeout_ms=DEFAULT_TIMEOUT)
+                         except: pass # Fallback to label strategy if xpath fails
 
                     obj_id = self._get_object_id(xpath, label, role)
                     if not obj_id: raise RuntimeError("Object ID lookup failed")
@@ -618,8 +609,8 @@ class ChromeCDP:
                     self._ensure_page_actionable(timeout_ms=PAGE_LOAD_TIMEOUT)
                     # Smart Wait
                     if xpath:
-                         try: self.wait_for_element(xpath, timeout_ms=DEFAULT_TIMEOUT)
-                         except: pass 
+                         try: self.wait_for_element(xpath=xpath, label=label, role=role, timeout_ms=DEFAULT_TIMEOUT)
+                         except: pass # Fallback to label strategy
 
                     obj_id = self._get_object_id(xpath, label, role)
                     if not obj_id: raise RuntimeError("Object ID lookup failed")
@@ -678,17 +669,7 @@ class ChromeCDP:
         if not obj_id: raise RuntimeError(f"Cannot send keys; element not found: {xpath or label}")
         
         self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
-        
-        # --- PHYSICAL FOCUS (The Fix) ---
-        # Instead of just JS focus(), we physically click the element center.
-        point = self._get_center_by_id(obj_id)
-        if point:
-            self.mouse_move(point["x"], point["y"])
-            self.mouse_down(point["x"], point["y"])
-            self.mouse_up(point["x"], point["y"])
-        else:
-            self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
-            
+        self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
         time.sleep(STEP_DELAY)
 
         # 2. Parse Modifiers
@@ -701,25 +682,29 @@ class ChromeCDP:
         code_val = "Unidentified"
         windows_vk = 0
 
+        # A. Check the Map first (F-Keys, Enter, arrows, etc.)
         if key in KEY_MAP:
             key_val, code_val, windows_vk = KEY_MAP[key]
             if key == "Enter": text = "\r"
 
+        # B. Handle Characters (A, b, 1, @)
         elif len(key) == 1:
             if modifiers["Shift"]: key_val = key.upper()
             else: key_val = key
             
             if key.isalpha(): 
                 code_val = f"Key{key.upper()}"
-                windows_vk = ord(key.upper()) 
+                windows_vk = ord(key.upper()) # VK for 'a' is 65 (same as 'A')
             elif key.isdigit(): 
                 code_val = f"Digit{key}"
                 windows_vk = ord(key)
             
+            # If no modifiers or just Shift, we usually want to send the text char too
             if not (modifiers["Control"] or modifiers["Alt"]):
                 text = key_val
 
         # 4. Dispatch Events
+        # KeyDown
         self._send("Input.dispatchKeyEvent", {
             "type": "keyDown", 
             "key": key_val, 
@@ -731,6 +716,7 @@ class ChromeCDP:
             "unmodifiedText": text
         })
 
+        # Char (Only if text is produced)
         if text:
              self._send("Input.dispatchKeyEvent", {
                 "type": "char",
@@ -739,6 +725,7 @@ class ChromeCDP:
                 "modifiers": mod_mask
             })
 
+        # KeyUp
         self._send("Input.dispatchKeyEvent", {
             "type": "keyUp", 
             "key": key_val, 
@@ -748,10 +735,11 @@ class ChromeCDP:
             "nativeVirtualKeyCode": windows_vk
         })
         
-        # 5. Fallback for Shadow DOM
+        # 5. Fallback for Shadow DOM "Ghost Enter"
         if key == "Enter":
             js_fallback = """
             function() {
+                // Force legacy event chain for older frameworks
                 const ops = ['keydown', 'keypress', 'keyup'];
                 ops.forEach(type => {
                     this.dispatchEvent(new KeyboardEvent(type, {
@@ -771,11 +759,11 @@ class ChromeCDP:
         self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
         return True
 
-    def type_human(self, text: str, xpath: str = None, label: str = None, role: str = None):
+    def type_human(self, xpath: str, text: str, label: str = None, role: str = None):
         try:
             self._ensure_page_actionable()
             obj_id = self._get_object_id(xpath, label, role)
-            if not obj_id: raise RuntimeError(f"Element not found: {xpath or label}")
+            if not obj_id: raise RuntimeError(f"Element not found: {xpath}")
 
             self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
             point = self._get_center_by_id(obj_id)
@@ -787,7 +775,7 @@ class ChromeCDP:
                 self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
             
             time.sleep(STEP_DELAY)
-            print(f"Human typing into target...")
+            print(f"Human typing into {xpath or label}...")
             for char in text:
                 self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": char})
                 self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
@@ -812,6 +800,7 @@ class ChromeCDP:
             if (tag === 'input' && ['button', 'submit', 'reset'].includes(el.type)) return el.value || '';
             if (tag === 'select') return el.options[el.selectedIndex].text || '';
             
+            // Check for shadow root text content if main element is a container
             if (el.shadowRoot) {
                  return el.shadowRoot.textContent || el.innerText || '';
             }
@@ -967,49 +956,29 @@ class ChromeCDP:
             self._save_debug_screenshot("select_option_failed")
             raise e
 
-    def select_custom_option(self, option_text: str, trigger_xpath: str = None, trigger_label: str = None):
+    def select_custom_option(self, trigger_xpath: str, option_text: str, trigger_label: str = None):
         try:
             self._ensure_page_actionable()
-            print(f"Clicking dropdown trigger...")
-            
-            # 1. Click Trigger (Using Smart Resolver)
+            print(f"Clicking dropdown trigger: {trigger_xpath}")
             self.click(trigger_xpath, trigger_label)
             time.sleep(UI_DELAY) 
 
-            # 2. Find Option using Shadow-Aware BFS
             expr = f"""
             (function() {{
-                const query = {json.dumps(option_text)}.toLowerCase().trim();
-                const queue = [document];
+                const query = {json.dumps(option_text)}.toLowerCase();
+                const candidates = document.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
                 let bestEl = null; let bestScore = -1;
-
-                while (queue.length > 0) {{
-                    const root = queue.shift();
-                    
-                    // A. Scan Candidates in this scope
-                    const candidates = root.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
-                    for (const el of candidates) {{
-                        if (el.shadowRoot) queue.push(el.shadowRoot);
-
-                        const rect = el.getBoundingClientRect();
-                        const style = window.getComputedStyle(el);
-                        if (rect.width < 1 || rect.height < 1 || style.visibility === 'hidden' || style.display === 'none') continue;
-                        
-                        const text = el.innerText.toLowerCase().trim();
-                        if (!text.includes(query)) continue;
-                        
-                        let score = 0;
-                        if (text === query) score += 100;
-                        if (el.tagName === 'LI' || el.getAttribute('role') === 'option') score += 50;
-                        if (text.length > query.length + 50) score -= 1000;
-                        if (score > bestScore) {{ bestScore = score; bestEl = el; }}
-                    }}
-
-                    // B. Queue generic shadow hosts
-                    const all = root.querySelectorAll('*');
-                    for (const el of all) {{
-                        if (el.shadowRoot) queue.push(el.shadowRoot);
-                    }}
+                for (const el of candidates) {{
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    if (rect.width < 5 || rect.height < 5 || style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') continue;
+                    const text = el.innerText.toLowerCase().trim();
+                    if (!text.includes(query)) continue;
+                    let score = 0;
+                    if (text === query) score += 100;
+                    if (el.tagName === 'LI' || el.getAttribute('role') === 'option') score += 50;
+                    if (text.length > query.length + 50) score -= 1000;
+                    if (score > bestScore) {{ bestScore = score; bestEl = el; }}
                 }}
                 return bestEl;
             }})()
@@ -1017,13 +986,10 @@ class ChromeCDP:
             msg_id = self._send("Runtime.evaluate", {"expression": expr, "returnByValue": False})
             result = self._recv(msg_id)
             remote_obj = result["result"]["result"]
-            
             if remote_obj.get("subtype") == "null" or "objectId" not in remote_obj:
                 raise RuntimeError(f"Option '{option_text}' not found (or visible) after clicking trigger.")
 
             option_id = remote_obj["objectId"]
-            
-            # 3. Click the Option
             self._send("DOM.scrollIntoViewIfNeeded", {"objectId": option_id})
             point = self._get_center_by_id(option_id)
             if point:
@@ -1033,50 +999,35 @@ class ChromeCDP:
             else:
                 self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.click(); }", "objectId": option_id})
             time.sleep(STEP_DELAY)
-            
         except Exception as e:
             self._save_debug_screenshot("custom_select_failed")
             raise e
 
-    def select_autocomplete_option(self, select_text: str, input_xpath: str = None, input_label: str = None):
+    def select_autocomplete_option(self, input_xpath: str, select_text: str, input_label: str = None):
         try:
             self._ensure_page_actionable()
-            
-            # 1. Resolve Input
-            obj_id = self._get_object_id(input_xpath, input_label, role="text")
-            if not obj_id: raise RuntimeError(f"Autocomplete input not found: {input_xpath or input_label}")
+            obj_id = self._get_object_id(input_xpath, input_label)
+            if not obj_id: raise RuntimeError(f"Autocomplete input not found: {input_xpath}")
 
-            print(f"Focusing input...")
+            print(f"Focusing input: {input_xpath}")
             self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
             self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); this.value = ''; }", "objectId": obj_id})
 
-            # 2. Shadow-Aware Check Function
             check_js = f"""
             (function() {{
                 const query = {json.dumps(select_text)}.toLowerCase().trim();
-                const queue = [document];
-                
-                while (queue.length > 0) {{
-                    const root = queue.shift();
-                    const candidates = root.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
-                    
-                    for (const el of candidates) {{
-                        if (el.shadowRoot) queue.push(el.shadowRoot);
-                        
-                        const style = window.getComputedStyle(el);
-                        if (style.display === 'none' || style.visibility === 'hidden') continue;
-                        
-                        const text = el.innerText.toLowerCase().trim();
-                        if (text === query || (text.includes(query) && text.length < query.length + 30)) return true;
-                    }}
-                    
-                    // Queue generic hosts
-                    root.querySelectorAll('*').forEach(el => {{ if(el.shadowRoot) queue.push(el.shadowRoot) }});
+                const candidates = document.querySelectorAll('li, [role="option"], div, span, a, .item, .option');
+                for (const el of candidates) {{
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width < 5 || rect.height < 5) continue;
+                    const text = el.innerText.toLowerCase().trim();
+                    if (text === query || (text.includes(query) && text.length < query.length + 30)) return true;
                 }}
                 return false;
             }})()
             """
-            
             found = False
             print(f"Typing '{select_text}'...")
             for i, char in enumerate(select_text):
@@ -1084,7 +1035,6 @@ class ChromeCDP:
                 self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
                 self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
                 time.sleep(AUTO_DELAY) 
-                
                 if i >= 1: 
                     msg_id = self._send("Runtime.evaluate", {"expression": check_js})
                     if self._recv(msg_id)["result"]["result"]["value"]:
@@ -1092,15 +1042,12 @@ class ChromeCDP:
                         found = True
                         break
             if not found: time.sleep(1.0)
-            
             self._select_visible_option(select_text)
-            
         except Exception as e:
             self._save_debug_screenshot("autocomplete_failed")
             raise e
 
     def _select_visible_option(self, option_text):
-        # UPDATED: BFS Shadow Search for Options
         expr = f"""
         (function() {{
             const query = {json.dumps(option_text)}.toLowerCase().trim();
@@ -1157,14 +1104,13 @@ class ChromeCDP:
         else:
             self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.click(); }", "objectId": option_id})
 
-    def multi_select(self, values: list[str], select_xpath: str = None, label: str = None, role: str = None):
+    def multi_select(self, select_xpath: str, values: list[str], label: str = None, role: str = None):
         try:
             self._ensure_page_actionable()
             obj_id = self._get_object_id(select_xpath, label, role)
-            if not obj_id: raise RuntimeError(f"Multi-select element not found: {select_xpath or label}")
+            if not obj_id: raise RuntimeError(f"Multi-select element not found or hidden: {select_xpath}")
 
             self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
-            
             expr = f"""
             function() {{
                 const select = this;
@@ -1201,8 +1147,6 @@ class ChromeCDP:
         Universal Resolver:
         1. Tries to find element by XPath.
         2. If failed, attempts to find element by Label + Role (Self-Healing).
-           - Checks attributes (placeholder, aria-label, title)
-           - Checks associated <label> tags (for="id")
         3. Returns the Chrome Remote Object ID (or None).
         """
         js_params = json.dumps({
@@ -1211,6 +1155,7 @@ class ChromeCDP:
             "role": role.lower().strip() if role else ""
         })
 
+        # UPDATED: ROBUST ATTRIBUTE CHECKER
         expr = f"""
         (function() {{
             const params = {js_params};
@@ -1242,23 +1187,6 @@ class ChromeCDP:
             let bestScore = -1;
             const queue = [document];
             
-            // Helper to find associated label text
-            function getAssociatedLabelText(el) {{
-                let text = "";
-                if (el.id) {{
-                    const labels = document.querySelectorAll(`label[for='${{el.id}}']`);
-                    labels.forEach(l => text += " " + l.innerText);
-                }}
-                if (el.getAttribute('aria-labelledby')) {{
-                     const ids = el.getAttribute('aria-labelledby').split(' ');
-                     ids.forEach(id => {{
-                         const labelEl = document.getElementById(id);
-                         if (labelEl) text += " " + labelEl.innerText;
-                     }});
-                }}
-                return text.toLowerCase();
-            }}
-
             while (queue.length > 0) {{
                 const root = queue.shift();
                 const allNodes = root.querySelectorAll('*');
@@ -1267,25 +1195,38 @@ class ChromeCDP:
                     if (el.shadowRoot) queue.push(el.shadowRoot);
                     if (!isVisible(el)) continue;
 
-                    // --- MATCHING LOGIC ---
-                    const tag = el.tagName.toLowerCase();
-                    const elRole = (el.getAttribute('role') || '').toLowerCase();
-                    const elType = (el.getAttribute('type') || '').toLowerCase();
-                    
-                    let directText = (el.innerText || '').toLowerCase();
-                    let valueText = (el.value || '').toLowerCase();
-                    let attrText = (el.getAttribute('placeholder') || el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('name') || '').toLowerCase();
-                    let labelText = getAssociatedLabelText(el); 
+                    // --- FIX: CHECK ALL ATTRIBUTES INDEPENDENTLY ---
+                    // Don't let 'value' mask the 'placeholder'
+                    const attributes = [
+                        el.innerText,
+                        el.value,
+                        el.getAttribute('placeholder'),
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('title'),
+                        el.getAttribute('name'),
+                        el.id
+                    ];
 
-                    const fullSignature = [directText, valueText, attrText, labelText].join(" ");
-                    if (!fullSignature.includes(params.label)) continue;
+                    // Check if ANY attribute matches the label
+                    const matchFound = attributes.some(attr => 
+                        attr && typeof attr === 'string' && attr.toLowerCase().trim().includes(params.label)
+                    );
 
+                    if (!matchFound) continue;
+
+                    // --- SCORING ---
                     let score = 0;
-                    if (attrText === params.label || labelText.trim() === params.label) score += 100;
-                    else if (fullSignature.includes(params.label)) score += 50;
+                    
+                    // Award points for exact matches in specific attributes
+                    if (attributes.some(a => a && a.toLowerCase().trim() === params.label)) score += 100;
+                    else score += 10;
 
                     if (params.role) {{
+                        const tag = el.tagName.toLowerCase();
+                        const elRole = (el.getAttribute('role') || '').toLowerCase();
+                        const elType = (el.getAttribute('type') || '').toLowerCase();
                         let roleMatch = false;
+
                         if (params.role.includes('button') && (tag === 'button' || elType === 'submit' || elRole === 'button')) roleMatch = true;
                         if (params.role.includes('link') && (tag === 'a' || elRole === 'link')) roleMatch = true;
                         if ((params.role.includes('text') || params.role.includes('edit')) && (tag === 'input' || tag === 'textarea')) roleMatch = true;
@@ -1296,8 +1237,13 @@ class ChromeCDP:
                         else score -= 20; 
                     }}
 
-                    if (tag === 'label') score -= 10; 
-                    if (['input', 'select', 'textarea', 'button'].includes(tag)) score += 30;
+                    // Preference Logic
+                    const tag = el.tagName.toLowerCase();
+                    if (['input', 'button', 'select', 'textarea', 'a'].includes(tag)) score += 20;
+                    
+                    // Penalize containers that just happen to contain the text
+                    const text = (el.innerText || '').toLowerCase();
+                    if (text.length > params.label.length + 50) score -= 50;
 
                     if (score > bestScore) {{
                         bestScore = score;
@@ -1332,6 +1278,7 @@ class ChromeCDP:
         except Exception: return None
 
     def find_elements_by_text(self, query: str):
+        # UPDATED: SHADOW DOM AWARE DISCOVERY
         js_script = f"""
         (function() {{
             const query = {json.dumps(query)}.toLowerCase().trim();
@@ -1341,11 +1288,14 @@ class ChromeCDP:
             while (queue.length > 0) {{
                 const root = queue.shift();
                 
+                // Broad selector for interactive items + potential containers
+                // NOTE: We need to traverse everything to find nested shadow roots
                 const nodes = root.querySelectorAll('*');
                 
                 for (const el of nodes) {{
                      if (el.shadowRoot) queue.push(el.shadowRoot);
                      
+                     // Optimization: Only process interactive-looking tags
                      const tag = el.tagName.toLowerCase();
                      const role = (el.getAttribute('role') || '').toLowerCase();
                      const isInteractive = ['input', 'button', 'a', 'select', 'textarea'].includes(tag) || 
@@ -1355,10 +1305,12 @@ class ChromeCDP:
                      
                      if (!isInteractive) continue;
                      
+                     // Visibility check
                      const rect = el.getBoundingClientRect();
                      const style = window.getComputedStyle(el);
                      if (rect.width < 1 || rect.height < 1 || style.visibility === 'hidden' || style.display === 'none') continue;
                      
+                     // Match Logic
                      const text = (el.innerText || '').toLowerCase();
                      const val = (el.value || '').toLowerCase();
                      const ph = (el.getAttribute('placeholder') || '').toLowerCase();
@@ -1369,9 +1321,10 @@ class ChromeCDP:
                      
                      if (text.includes(query) || val.includes(query) || ph.includes(query) || name.includes(query) || id.includes(query) || aria.includes(query) || title.includes(query)) {{
                          
+                         // Generate Fingerprint
                          let xpath = '';
                          if (el.id) xpath = `//*[@id='${{el.id}}']`;
-                         else xpath = `//${{tag}}`;
+                         else xpath = `//${{tag}}`; // Fallback (Note: XPaths don't work in Shadow DOM anyway)
                          
                          candidates.push({{
                             tag: tag,
@@ -1405,6 +1358,7 @@ class ChromeCDP:
         return result_val if isinstance(result_val, list) else []
 
     def get_all_interactive_elements(self, tag_name: str = "button"):
+        # UPDATED: SHADOW DOM AWARE SCANNER
         js_script = f"""
         (function() {{
             const results = [];
@@ -1417,6 +1371,7 @@ class ChromeCDP:
             while (queue.length > 0) {{
                 const root = queue.shift();
                 
+                // 1. Get matches in this scope
                 const nodes = root.querySelectorAll(selector);
                 nodes.forEach(el => {{
                     const rect = el.getBoundingClientRect();
@@ -1431,6 +1386,7 @@ class ChromeCDP:
                     }});
                 }});
                 
+                // 2. Queue Shadow Roots
                 const allNodes = root.querySelectorAll('*');
                 allNodes.forEach(el => {{
                     if (el.shadowRoot) queue.push(el.shadowRoot);
@@ -1477,6 +1433,7 @@ class ChromeCDP:
             if not response.ok: 
                 return []
             
+            # Filter for pages only (exclude service workers/extensions)
             pages = [t for t in response.json() if t.get("type") == "page"]
             return pages
         except Exception as e:
@@ -1486,19 +1443,27 @@ class ChromeCDP:
     def switch_to_tab(self, keyword: str = None, index: int = None):
         """
         Switches the automation connection to a different tab.
+        
+        Args:
+            keyword: A word to match in the Title or URL (case-insensitive).
+            index: 0 for the first tab, -1 for the newest/last tab.
         """
         print(f"Switching tab matching: keyword='{keyword}', index={index}...")
         
+        # 1. Fetch current tabs
         target = None
         for _ in range(5):
             tabs = self.get_tabs()
             
+            # Strategy A: Match by Index (e.g., -1 for newest)
             if index is not None:
                 if 0 <= index < len(tabs):
                     target = tabs[index]
                 elif index < 0 and abs(index) <= len(tabs):
+                    # Chrome usually appends new tabs to the end of the list
                     target = tabs[index]
             
+            # Strategy B: Match by Keyword (Title or URL)
             elif keyword:
                 for t in tabs:
                     title = t.get("title", "").lower()
@@ -1514,6 +1479,7 @@ class ChromeCDP:
         if not target:
             raise RuntimeError(f"No tab found matching keyword='{keyword}' or index={index}")
 
+        # 2. Hot-Swap the WebSocket
         print(f"Connecting to target: {target.get('title')} ({target['id']})")
         
         if self.ws:
@@ -1527,10 +1493,12 @@ class ChromeCDP:
         except Exception as e:
             raise RuntimeError(f"Failed to connect to new tab: {e}")
 
+        # 3. Re-Initialize Domains
         self._inflight_requests = 0
         self._enable_domains()
         self.force_viewport(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
         
+        # 4. Stabilize
         self._ensure_page_actionable(timeout_ms=5000)
         print("Tab switch successful.")
 
