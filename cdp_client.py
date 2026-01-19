@@ -1279,10 +1279,10 @@ class ChromeCDP:
         
     def _get_object_id(self, xpath: str = None, label: str = None, role: str = None):
         """
-        Universal Resolver:
-        1. Tries to find element by XPath (Light DOM).
-        2. Tries to find element by XPath (Deep Shadow Scan) - NEW.
-        3. Attempts to find element by Label + Role (Self-Healing).
+        Universal Resolver (Global Frame Search):
+        1. Checks the current frame first (Fastest).
+        2. If not found, ITERATES through all other available frames (Deep Scan).
+        3. If found in a different frame, AUTO-SWITCHES context to that frame.
         """
         js_params = json.dumps({
             "xpath": xpath,
@@ -1290,26 +1290,23 @@ class ChromeCDP:
             "role": role.lower().strip() if role else ""
         })
 
-        expr = f"""
+        # The detection script (Same logic as before, just packaged for reuse)
+        detection_script = f"""
         (function() {{
             const params = {js_params};
             
             function isVisible(el) {{
                 const rect = el.getBoundingClientRect();
                 const style = window.getComputedStyle(el);
-                
-                // RELAXED CHECK: Some clickable overlays have 0 height but visible overflow
                 const isGeometryVisible = (rect.width > 0 && rect.height > 0) || (style.overflow !== 'hidden');
                 const isStyleVisible = style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
-                
                 return isGeometryVisible && isStyleVisible;
             }}
 
-            // --- STRATEGY 1: STANDARD XPATH (Light DOM) ---
+            // --- STRATEGY 1: XPATH (Light DOM) ---
             if (params.xpath) {{
                 try {{
-                    const snapshot = document.evaluate(params.xpath, document, null,
-                        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+                    const snapshot = document.evaluate(params.xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
                     for (let i = 0; i < snapshot.snapshotLength; i++) {{
                         const el = snapshot.snapshotItem(i);
                         if (isVisible(el)) return el; 
@@ -1318,12 +1315,8 @@ class ChromeCDP:
             }}
 
             // --- STRATEGY 1.5: DEEP XPATH (Shadow DOM) ---
-            // If standard XPath failed, it might be an ID or Attribute inside a Shadow Root
             if (params.xpath) {{
-                 // Only try this scan if the XPath looks simple (e.g., //*[@id='...'])
-                 // Complex absolute paths (//html/body...) won't work in Shadow DOM anyway.
                  const isSimpleId = params.xpath.includes("@id=") || params.xpath.startsWith("//input") || params.xpath.startsWith("//button");
-                 
                  if (isSimpleId) {{
                      const queue = [document];
                      while (queue.length > 0) {{
@@ -1333,8 +1326,7 @@ class ChromeCDP:
                              if (el.shadowRoot) {{
                                  queue.push(el.shadowRoot);
                                  try {{
-                                     const snapshot = document.evaluate(params.xpath, el.shadowRoot, null,
-                                        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+                                     const snapshot = document.evaluate(params.xpath, el.shadowRoot, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
                                      for (let i = 0; i < snapshot.snapshotLength; i++) {{
                                          const match = snapshot.snapshotItem(i);
                                          if (isVisible(match)) return match;
@@ -1346,7 +1338,7 @@ class ChromeCDP:
                  }}
             }}
 
-            // --- STRATEGY 2: LABEL + ROLE (The Detective) ---
+            // --- STRATEGY 2: LABEL + ROLE ---
             if (!params.label) return null;
 
             let bestEl = null;
@@ -1378,8 +1370,6 @@ class ChromeCDP:
                     if (!isVisible(el)) continue;
 
                     const tag = el.tagName.toLowerCase();
-                    const elRole = (el.getAttribute('role') || '').toLowerCase();
-                    const elType = (el.getAttribute('type') || '').toLowerCase();
                     
                     let directText = (el.innerText || '').toLowerCase();
                     let valueText = (el.value || '').toLowerCase();
@@ -1394,6 +1384,8 @@ class ChromeCDP:
                     else if (fullSignature.includes(params.label)) score += 50;
 
                     if (params.role) {{
+                        const elRole = (el.getAttribute('role') || '').toLowerCase();
+                        const elType = (el.getAttribute('type') || '').toLowerCase();
                         let roleMatch = false;
                         if (params.role.includes('button') && (tag === 'button' || elType === 'submit' || elRole === 'button')) roleMatch = true;
                         if (params.role.includes('link') && (tag === 'a' || elRole === 'link')) roleMatch = true;
@@ -1414,27 +1406,48 @@ class ChromeCDP:
                     }}
                 }}
             }}
-
             return bestEl;
         }})()
         """
 
-        params = { "expression": expr, "returnByValue": False }
-        if self.current_context_id: params["contextId"] = self.current_context_id
-
-        # Robust Send: Fallback to global context if frame is stale
-        try:
-            msg_id = self._send("Runtime.evaluate", params)
-            result = self._recv(msg_id)
-        except Exception:
-             if "contextId" in params: del params["contextId"]
-             msg_id = self._send("Runtime.evaluate", params)
-             result = self._recv(msg_id)
-
-        remote_obj = result.get("result", {}).get("result", {})
+        # --- EXECUTION LOGIC (Global Search) ---
         
-        if remote_obj.get("subtype") == "null" or "objectId" not in remote_obj: return None
-        return remote_obj["objectId"]
+        # 1. Define the contexts to check
+        # Always start with the current context (fastest)
+        contexts_to_check = [self.current_context_id]
+        
+        # Add all other known contexts to the list (in case it's not in the current one)
+        # We filter out the current one to avoid double checking
+        other_contexts = [ctx_id for ctx_id in self.context_map.values() if ctx_id != self.current_context_id]
+        contexts_to_check.extend(other_contexts)
+        
+        # 2. Iterate and Scan
+        for ctx_id in contexts_to_check:
+            params = { "expression": detection_script, "returnByValue": False }
+            if ctx_id: params["contextId"] = ctx_id
+            
+            try:
+                msg_id = self._send("Runtime.evaluate", params)
+                result = self._recv(msg_id)
+                remote_obj = result.get("result", {}).get("result", {})
+                
+                # Check if we found a valid object
+                if remote_obj.get("subtype") != "null" and "objectId" in remote_obj:
+                    # MATCH FOUND!
+                    
+                    # Auto-Switch Context (The "Sticky" Logic)
+                    if ctx_id != self.current_context_id:
+                        self.current_context_id = ctx_id
+                        # Optional: Print debug info so you know it happened
+                        # frame_name = next((k for k, v in self.context_map.items() if v == ctx_id), "unknown")
+                        # print(f"Auto-switched to frame: {frame_name}")
+                        
+                    return remote_obj["objectId"]
+                    
+            except Exception:
+                continue
+
+        return None
     
     def _get_center_by_id(self, object_id):
         try:
