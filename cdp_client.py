@@ -313,10 +313,15 @@ class ChromeCDP:
                 # Frame Discovery (ServiceNow Support)
                 if msg.get("method") == "Runtime.executionContextCreated":
                     ctx = msg["params"]["context"]
+                    c_id = ctx["id"]
+                    # FIX: Capture ALL contexts, even if unnamed. 
+                    # Use the name if valid, otherwise create a unique ID.
                     name = ctx.get("name")
-                    if name:
-                        with self._lock:
-                            self.context_map[name] = ctx["id"]
+                    if not name:
+                        name = f"frame_{c_id}"
+                    
+                    with self._lock:
+                        self.context_map[name] = c_id
 
                 # Network Tracking
                 if msg.get("method") in ("Network.requestWillBeSent", "Network.responseReceived", "Network.loadingFinished", "Network.loadingFailed"):
@@ -1280,19 +1285,25 @@ class ChromeCDP:
     def _get_object_id(self, xpath: str = None, label: str = None, role: str = None):
         """
         Universal Resolver (Global Frame Search):
-        1. SYNC: Flushes pending browser events to discover new frames.
-        2. Checks the current frame first.
-        3. If not found, ITERATES through all other available frames (Deep Scan).
-        4. If found in a different frame, AUTO-SWITCHES context.
+        1. REFRESH: Forces Chrome to resend all frame contexts immediately.
+        2. CHECKS: Scans current frame first, then ALL other frames.
+        3. AUTO-SWITCH: Locks onto the correct frame if found.
         """
-        # --- CRITICAL FIX: Sync Contexts ---
-        # We send a dummy command to force the _recv loop to process
-        # any pending "Execution Context Created" events from the buffer.
+        # --- CRITICAL FIX: HARD REFRESH CONTEXTS ---
+        # 1. Disable Runtime to clear the internal state
+        try: self._send("Runtime.disable")
+        except: pass
+        
+        # 2. Enable Runtime to FORCE Chrome to resend 'executionContextCreated' for all frames
+        # We perform a blocking receive here to ensure we catch them all.
         try:
-            self._recv(self._send("Runtime.enable"))
+            msg_id = self._send("Runtime.enable")
+            self._recv(msg_id) 
+            # Note: The _recv loop above will catch the "Created" events 
+            # and populate self.context_map automatically.
         except Exception:
             pass
-        # -----------------------------------
+        # -------------------------------------------
 
         js_params = json.dumps({
             "xpath": xpath,
@@ -1422,11 +1433,9 @@ class ChromeCDP:
         # --- EXECUTION LOGIC (Global Search) ---
         
         # 1. Define the contexts to check
-        # Always start with the current context (fastest)
         contexts_to_check = [self.current_context_id]
         
-        # Add all other known contexts to the list
-        # Since we synced at the start, context_map is now fresh!
+        # Add all other known contexts (Now populated correctly!)
         other_contexts = [ctx_id for ctx_id in self.context_map.values() if ctx_id != self.current_context_id]
         contexts_to_check.extend(other_contexts)
         
@@ -1443,12 +1452,11 @@ class ChromeCDP:
                 # Check if we found a valid object
                 if remote_obj.get("subtype") != "null" and "objectId" in remote_obj:
                     # MATCH FOUND!
-                    
-                    # Auto-Switch Context (The "Sticky" Logic)
                     if ctx_id != self.current_context_id:
                         self.current_context_id = ctx_id
+                        # Optional: Print frame switch for debugging
                         frame_name = next((k for k, v in self.context_map.items() if v == ctx_id), "unknown")
-                        print(f"DEBUG: Auto-switched to frame: {frame_name}")
+                        print(f"DEBUG: Found element in frame '{frame_name}'. Auto-switching context.")
                         
                     return remote_obj["objectId"]
                     
