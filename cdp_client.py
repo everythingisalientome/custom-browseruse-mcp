@@ -656,12 +656,12 @@ class ChromeCDP:
 
     def send_keys(self, keys: str, xpath: str = None, label: str = None, role: str = None):
         self._ensure_page_actionable()
-        if xpath:
-            obj_id = self._get_object_id(xpath, label, role)
-            if not obj_id: raise RuntimeError(f"Cannot send keys; element not found: {xpath}")
-            self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
-            self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
-            time.sleep(STEP_DELAY)
+        obj_id = self._get_object_id(xpath, label, role)
+        if not obj_id: raise RuntimeError(f"Cannot send keys; element not found: {xpath}")
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+        self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
+        time.sleep(STEP_DELAY)
+            
 
         modifiers, key = self._parse_key_combo(keys)
         mod_mask = ((2 if modifiers["Control"] else 0) | (8 if modifiers["Shift"] else 0) | (1 if modifiers["Alt"] else 0) | (4 if modifiers["Meta"] else 0))
@@ -705,7 +705,7 @@ class ChromeCDP:
                 self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
             
             time.sleep(STEP_DELAY)
-            print(f"Human typing into {xpath}...")
+            print(f"Human typing into {xpath or label}...")
             for char in text:
                 self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": char})
                 self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
@@ -1079,14 +1079,13 @@ class ChromeCDP:
         2. If failed, attempts to find element by Label + Role (Self-Healing).
         3. Returns the Chrome Remote Object ID (or None).
         """
-        # We inject the search parameters into the JS scope
         js_params = json.dumps({
             "xpath": xpath,
             "label": label.lower().strip() if label else "",
             "role": role.lower().strip() if role else ""
         })
 
-        # UPDATED: AGGRESSIVE SHADOW WALKER
+        # UPDATED: ROBUST ATTRIBUTE CHECKER
         expr = f"""
         (function() {{
             const params = {js_params};
@@ -1099,85 +1098,81 @@ class ChromeCDP:
                         style.opacity !== '0');
             }}
 
-            // --- STRATEGY 1: XPATH (The Sniper) ---
+            // --- STRATEGY 1: XPATH ---
             if (params.xpath) {{
                 try {{
                     const snapshot = document.evaluate(params.xpath, document, null,
                         XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-                    
                     for (let i = 0; i < snapshot.snapshotLength; i++) {{
                         const el = snapshot.snapshotItem(i);
                         if (isVisible(el)) return el; 
                     }}
-                }} catch (e) {{
-                    // Fallthrough
-                }}
+                }} catch (e) {{ }}
             }}
 
-            // --- STRATEGY 2: LABEL + ROLE (The Detective) ---
+            // --- STRATEGY 2: LABEL + ROLE ---
             if (!params.label) return null;
 
             let bestEl = null;
             let bestScore = -1;
-            
-            // Queue starts with the main document
             const queue = [document];
             
             while (queue.length > 0) {{
                 const root = queue.shift();
-                
-                // CRITICAL FIX: Select ALL elements to ensure we capture every Shadow Host
                 const allNodes = root.querySelectorAll('*');
 
                 for (const el of allNodes) {{
-                    // 1. Add Nested Shadow Roots to Queue (The "Gatekeeper" Fix)
                     if (el.shadowRoot) queue.push(el.shadowRoot);
-                    
-                    // 2. Filter: Is this an element we care about?
-                    // We only score it if it matches our "Interactive" criteria OR has the text we want
-                    const tag = el.tagName.toLowerCase();
-                    const elRole = (el.getAttribute('role') || '').toLowerCase();
-                    const text = (el.innerText || el.value || el.getAttribute('placeholder') || el.getAttribute('aria-label') || '').toLowerCase().trim();
-                    const title = (el.getAttribute('title') || '').toLowerCase();
-
-                    // Optimization: If it's invisible, skip scoring
                     if (!isVisible(el)) continue;
 
-                    // 3. Text Matching Check (Must match to even be considered)
-                    // We check text content, value, placeholder, aria-label, and title
-                    if (!text.includes(params.label) && !title.includes(params.label)) continue;
+                    // --- FIX: CHECK ALL ATTRIBUTES INDEPENDENTLY ---
+                    // Don't let 'value' mask the 'placeholder'
+                    const attributes = [
+                        el.innerText,
+                        el.value,
+                        el.getAttribute('placeholder'),
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('title'),
+                        el.getAttribute('name'),
+                        el.id
+                    ];
 
-                    // 4. Scoring System
+                    // Check if ANY attribute matches the label
+                    const matchFound = attributes.some(attr => 
+                        attr && typeof attr === 'string' && attr.toLowerCase().trim().includes(params.label)
+                    );
+
+                    if (!matchFound) continue;
+
+                    // --- SCORING ---
                     let score = 0;
+                    
+                    // Award points for exact matches in specific attributes
+                    if (attributes.some(a => a && a.toLowerCase().trim() === params.label)) score += 100;
+                    else score += 10;
 
-                    // A. Text Precision
-                    if (text === params.label) score += 100;           
-                    else if (text.startsWith(params.label)) score += 50; 
-                    else score += 10;                                    
-
-                    // B. Role Matching (Relaxed for ServiceNow)
                     if (params.role) {{
+                        const tag = el.tagName.toLowerCase();
+                        const elRole = (el.getAttribute('role') || '').toLowerCase();
                         const elType = (el.getAttribute('type') || '').toLowerCase();
                         let roleMatch = false;
 
                         if (params.role.includes('button') && (tag === 'button' || elType === 'submit' || elRole === 'button')) roleMatch = true;
                         if (params.role.includes('link') && (tag === 'a' || elRole === 'link')) roleMatch = true;
                         if ((params.role.includes('text') || params.role.includes('edit')) && (tag === 'input' || tag === 'textarea')) roleMatch = true;
-                        
-                        // FIX: ServiceNow often implements combos as inputs. Allow input for 'combo' role.
                         if (params.role.includes('combo') && (tag === 'select' || elRole === 'combobox' || tag === 'input')) roleMatch = true;
-                        
                         if (params.role.includes('check') && (elType === 'checkbox' || elRole === 'checkbox')) roleMatch = true;
 
                         if (roleMatch) score += 50;
                         else score -= 20; 
                     }}
 
-                    // C. Preference Logic
-                    // Prefer Inputs/Buttons over generic divs even if text matches
+                    // Preference Logic
+                    const tag = el.tagName.toLowerCase();
                     if (['input', 'button', 'select', 'textarea', 'a'].includes(tag)) score += 20;
                     
-                    // Penalize huge containers (e.g. the whole form div that contains the word "Search")
+                    // Penalize containers that just happen to contain the text
+                    const text = (el.innerText || '').toLowerCase();
                     if (text.length > params.label.length + 50) score -= 50;
 
                     if (score > bestScore) {{
@@ -1191,25 +1186,14 @@ class ChromeCDP:
         }})()
         """
 
-        # 1. Define params
-        params = {
-            "expression": expr, 
-            "returnByValue": False  # CRITICAL: Return the DOM Node Pointer (ObjectId)
-        }
-        
-        # 2. Inject Context (Iframe Support)
-        if self.current_context_id:
-            params["contextId"] = self.current_context_id
+        params = { "expression": expr, "returnByValue": False }
+        if self.current_context_id: params["contextId"] = self.current_context_id
 
-        # 3. Execute
         msg_id = self._send("Runtime.evaluate", params)
         result = self._recv(msg_id)
-        
-        # 4. Extract Result
         remote_obj = result.get("result", {}).get("result", {})
-        if remote_obj.get("subtype") == "null" or "objectId" not in remote_obj:
-            return None
-            
+        
+        if remote_obj.get("subtype") == "null" or "objectId" not in remote_obj: return None
         return remote_obj["objectId"]
     
     def _get_center_by_id(self, object_id):
