@@ -1308,7 +1308,6 @@ class ChromeCDP:
             const params = {js_params};
             
             function isVisible(el) {{
-                // RELAXED CHECK: Trust style over geometry. 
                 const style = window.getComputedStyle(el);
                 const isStyleVisible = style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
                 return isStyleVisible;
@@ -1382,27 +1381,29 @@ class ChromeCDP:
 
                     const tag = el.tagName.toLowerCase();
                     
-                    // --- FIX: CHECK ALL ATTRIBUTES (The "Net") ---
-                    // We combine every possible identifier into one string to ensure we don't miss a match.
+                    // --- FIX: ROBUST ATTRIBUTE CHECKING ---
                     const attrSources = [
                         el.getAttribute('placeholder'),
                         el.getAttribute('aria-label'),
                         el.getAttribute('name'),
                         el.getAttribute('title'),
-                        el.id, // Critical: Check the ID too
-                        (el.innerText || ''),
-                        (el.value || '')
+                        el.id,
+                        el.innerText,
+                        el.value
                     ];
                     
+                    // Force String() conversion to prevent "toLowerCase is not a function" crash
                     const fullSignature = attrSources
-                        .map(val => (val || '').toLowerCase())
+                        .map(val => {{
+                            if (val === null || val === undefined) return '';
+                            return String(val).toLowerCase(); 
+                        }})
                         .join(" ") + " " + getAssociatedLabelText(el);
                         
                     if (!fullSignature.includes(params.label)) continue;
 
                     let score = 0;
                     
-                    // Exact match on key attributes gets priority
                     const specificAttrs = [el.getAttribute('aria-label'), el.getAttribute('placeholder'), el.getAttribute('name')];
                     if (specificAttrs.some(attr => (attr || '').toLowerCase() === params.label)) {{
                         score += 100;
@@ -1442,20 +1443,17 @@ class ChromeCDP:
         other_contexts = [ctx_id for ctx_id in self.context_map.values() if ctx_id != self.current_context_id]
         contexts_to_check.extend(other_contexts)
         
-        # 3. SCAN LOOP WITH URL DEBUGGING
+        # 3. SCAN LOOP
         for ctx_id in contexts_to_check:
             if not ctx_id: continue
             
-            # Debug: Check URL of the frame we are scanning
+            # Debug URL printing (Optional - keeping it helps verify Frame 8 detection)
             try:
-                url_expr = "window.location.href"
-                url_msg = self._send("Runtime.evaluate", {"expression": url_expr, "contextId": ctx_id})
+                url_msg = self._send("Runtime.evaluate", {"expression": "window.location.href", "contextId": ctx_id})
                 url_res = self._recv(url_msg)
-                frame_url = url_res.get("result", {}).get("result", {}).get("value", "unknown")
-                # Print last 50 chars of URL to identify the frame (e.g. ".../incident.do...")
-                print(f"DEBUG: Scanning Frame ID {ctx_id} | URL: ...{frame_url[-50:]}") 
-            except:
-                pass
+                frame_url = url_res.get("result", {}).get("result", {}).get("value", "unknown")[-50:]
+                print(f"DEBUG: Scanning Frame {ctx_id} | {frame_url}") 
+            except: pass
 
             params = { "expression": detection_script, "returnByValue": False, "contextId": ctx_id }
             
@@ -1464,10 +1462,15 @@ class ChromeCDP:
                 result = self._recv(msg_id)
                 remote_obj = result.get("result", {}).get("result", {})
                 
-                if remote_obj.get("subtype") != "null" and "objectId" in remote_obj:
+                # --- FIX: VALIDATION CHECK ---
+                # Only accept if it is a valid DOM Node, NOT an Error object
+                subtype = remote_obj.get("subtype")
+                if subtype != "error" and "objectId" in remote_obj and subtype != "null":
+                    
                     if ctx_id != self.current_context_id:
                         self.current_context_id = ctx_id
-                        print(f"DEBUG: Found element in Frame {ctx_id}. Auto-switching context.")
+                        print(f"DEBUG: Found element in Frame {ctx_id}. Auto-switching.")
+                        
                     return remote_obj["objectId"]
             except Exception:
                 continue
