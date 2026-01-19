@@ -86,21 +86,36 @@ PROXIES = {
     "https": HTTPS_PROXY
 }
 
+# Format: "KeyName": ("key_value", "code_value", windows_virtual_key_code)
 KEY_MAP = {
-    "Enter": ("Enter", "Enter"),
-    "Tab": ("Tab", "Tab"),
-    "Escape": ("Escape", "Escape"),
-    "Backspace": ("Backspace", "Backspace"),
-    "Delete": ("Delete", "Delete"),
-    "Space": (" ", "Space"),
-    "ArrowUp": ("ArrowUp", "ArrowUp"),
-    "ArrowDown": ("ArrowDown", "ArrowDown"),
-    "ArrowLeft": ("ArrowLeft", "ArrowLeft"),
-    "ArrowRight": ("ArrowRight", "ArrowRight"),
-    "Home": ("Home", "Home"),
-    "End": ("End", "End"),
-    "PageUp": ("PageUp", "PageUp"),
-    "PageDown": ("PageDown", "PageDown"),
+    "Enter": ("Enter", "Enter", 13),
+    "Tab": ("Tab", "Tab", 9),
+    "Escape": ("Escape", "Escape", 27),
+    "Backspace": ("Backspace", "Backspace", 8),
+    "Delete": ("Delete", "Delete", 46),
+    "Insert": ("Insert", "Insert", 45),
+    "Home": ("Home", "Home", 36),
+    "End": ("End", "End", 35),
+    "PageUp": ("PageUp", "PageUp", 33),
+    "PageDown": ("PageDown", "PageDown", 34),
+    "Space": (" ", "Space", 32),
+    "ArrowUp": ("ArrowUp", "ArrowUp", 38),
+    "ArrowDown": ("ArrowDown", "ArrowDown", 40),
+    "ArrowLeft": ("ArrowLeft", "ArrowLeft", 37),
+    "ArrowRight": ("ArrowRight", "ArrowRight", 39),
+    # F-Keys
+    "F1": ("F1", "F1", 112),
+    "F2": ("F2", "F2", 113),
+    "F3": ("F3", "F3", 114),
+    "F4": ("F4", "F4", 115),
+    "F5": ("F5", "F5", 116),
+    "F6": ("F6", "F6", 117),
+    "F7": ("F7", "F7", 118),
+    "F8": ("F8", "F8", 119),
+    "F9": ("F9", "F9", 120),
+    "F10": ("F10", "F10", 121),
+    "F11": ("F11", "F11", 122),
+    "F12": ("F12", "F12", 123),
 }
 
 class ChromeCDP:
@@ -656,31 +671,94 @@ class ChromeCDP:
 
     def send_keys(self, keys: str, xpath: str = None, label: str = None, role: str = None):
         self._ensure_page_actionable()
+        
+        # 1. Resolve & Focus
         obj_id = self._get_object_id(xpath, label, role)
-        if not obj_id: raise RuntimeError(f"Cannot send keys; element not found: {xpath}")
+        if not obj_id: raise RuntimeError(f"Cannot send keys; element not found: {xpath or label}")
+        
         self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
         self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
         time.sleep(STEP_DELAY)
-            
 
+        # 2. Parse Modifiers
         modifiers, key = self._parse_key_combo(keys)
         mod_mask = ((2 if modifiers["Control"] else 0) | (8 if modifiers["Shift"] else 0) | (1 if modifiers["Alt"] else 0) | (4 if modifiers["Meta"] else 0))
 
+        # 3. Determine Codes
+        text = ""
+        key_val = key
+        code_val = "Unidentified"
+        windows_vk = 0
+
+        # A. Check the Map first (F-Keys, Enter, arrows, etc.)
         if key in KEY_MAP:
-            key_val, code_val = KEY_MAP[key]
-            type_down = "rawKeyDown" if key == "Enter" else "keyDown"
+            key_val, code_val, windows_vk = KEY_MAP[key]
+            if key == "Enter": text = "\r"
+
+        # B. Handle Characters (A, b, 1, @)
         elif len(key) == 1:
             if modifiers["Shift"]: key_val = key.upper()
             else: key_val = key
-            if key.isalpha(): code_val = f"Key{key.upper()}"
-            elif key.isdigit(): code_val = f"Digit{key}"
-            else: code_val = "Unidentified"
-            type_down = "keyDown"
-        else:
-            key_val = key; code_val = "Unidentified"; type_down = "keyDown"
+            
+            if key.isalpha(): 
+                code_val = f"Key{key.upper()}"
+                windows_vk = ord(key.upper()) # VK for 'a' is 65 (same as 'A')
+            elif key.isdigit(): 
+                code_val = f"Digit{key}"
+                windows_vk = ord(key)
+            
+            # If no modifiers or just Shift, we usually want to send the text char too
+            if not (modifiers["Control"] or modifiers["Alt"]):
+                text = key_val
 
-        self._send("Input.dispatchKeyEvent", {"type": type_down, "key": key_val, "code": code_val, "modifiers": mod_mask, "windowsVirtualKeyCode": 0, "nativeVirtualKeyCode": 0})
-        self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": key_val, "code": code_val, "modifiers": mod_mask})
+        # 4. Dispatch Events
+        # KeyDown
+        self._send("Input.dispatchKeyEvent", {
+            "type": "keyDown", 
+            "key": key_val, 
+            "code": code_val, 
+            "modifiers": mod_mask, 
+            "windowsVirtualKeyCode": windows_vk, 
+            "nativeVirtualKeyCode": windows_vk,
+            "text": text,
+            "unmodifiedText": text
+        })
+
+        # Char (Only if text is produced)
+        if text:
+             self._send("Input.dispatchKeyEvent", {
+                "type": "char",
+                "text": text,
+                "unmodifiedText": text,
+                "modifiers": mod_mask
+            })
+
+        # KeyUp
+        self._send("Input.dispatchKeyEvent", {
+            "type": "keyUp", 
+            "key": key_val, 
+            "code": code_val, 
+            "modifiers": mod_mask,
+            "windowsVirtualKeyCode": windows_vk, 
+            "nativeVirtualKeyCode": windows_vk
+        })
+        
+        # 5. Fallback for Shadow DOM "Ghost Enter"
+        if key == "Enter":
+            js_fallback = """
+            function() {
+                // Force legacy event chain for older frameworks
+                const ops = ['keydown', 'keypress', 'keyup'];
+                ops.forEach(type => {
+                    this.dispatchEvent(new KeyboardEvent(type, {
+                        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+                        bubbles: true, cancelable: true, view: window
+                    }));
+                });
+                this.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            """
+            self._send("Runtime.callFunctionOn", {"functionDeclaration": js_fallback, "objectId": obj_id})
 
     def scroll_into_view(self, xpath: str = None, label: str = None, role: str = None):
         obj_id = self._get_object_id(xpath, label, role)
