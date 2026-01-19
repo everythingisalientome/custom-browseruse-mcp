@@ -437,8 +437,14 @@ class ChromeCDP:
         raise TimeoutError("Network did not become idle")
 
     def wait_for_text(self, text: str, timeout_ms: int = DEFAULT_TIMEOUT):
+        """
+        Waits for text to appear in ANY frame.
+        Self-Healing: If the current frame dies (navigation), it automatically scans all other frames.
+        """
         deadline = time.monotonic() + timeout_ms / 1000
         js_params = json.dumps(text)
+        
+        # JS to search for visible text in Light DOM + Shadow DOM
         expr = f"""
         (function () {{
             const target = {js_params};
@@ -447,6 +453,7 @@ class ChromeCDP:
                 const root = queue.shift();
                 if (!root) continue;
                 
+                // 1. Scan Text Nodes
                 const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
                 while (walker.nextNode()) {{
                     const node = walker.currentNode;
@@ -459,6 +466,7 @@ class ChromeCDP:
                     }}
                 }}
 
+                // 2. Queue Shadow Roots
                 const shadowCandidates = root.querySelectorAll('*');
                 for (const el of shadowCandidates) {{
                      if (el.shadowRoot) queue.push(el.shadowRoot);
@@ -467,15 +475,53 @@ class ChromeCDP:
             return false;
         }})()
         """
+        
         while time.monotonic() < deadline:
-            params = {"expression": expr}
-            if self.current_context_id:
-                params["contextId"] = self.current_context_id
+            # --- CRITICAL FIX: Refresh Contexts ---
+            # If the page reloaded, we need to know about new frames immediately.
+            try:
+                self._recv(self._send("Runtime.enable"))
+            except Exception: pass
+            
+            # Define Search Scope: Current Frame + All Other Frames
+            contexts = [self.current_context_id]
+            others = [ctx for ctx in self.context_map.values() if ctx != self.current_context_id]
+            contexts.extend(others)
+            
+            found = False
+            for ctx_id in contexts:
+                params = {"expression": expr}
+                if ctx_id: params["contextId"] = ctx_id
 
-            msg_id = self._send("Runtime.evaluate", params)
-            result = self._recv(msg_id)["result"]["result"]
-            if result.get("value") is True: return
+                try:
+                    msg_id = self._send("Runtime.evaluate", params)
+                    response = self._recv(msg_id)
+                    
+                    # 1. Handle "Frame Dead" (-32000) gracefully
+                    if "error" in response and response["error"].get("code") == -32000:
+                        if ctx_id == self.current_context_id:
+                            print(f"Current context {ctx_id} died. Resetting to global search.")
+                            self.current_context_id = None
+                        continue
+
+                    # 2. Check Result
+                    result = response.get("result", {}).get("result", {})
+                    if result.get("value") is True:
+                        # Found it! If it was in a different frame, sticky-switch to it.
+                        if ctx_id and ctx_id != self.current_context_id:
+                            self.current_context_id = ctx_id
+                            print(f"Text found in Frame {ctx_id}. Context switched.")
+                        found = True
+                        break
+                        
+                except Exception:
+                    continue
+            
+            if found:
+                return
+
             time.sleep(STEP_DELAY)
+            
         raise TimeoutError(f"Text not found within {timeout_ms}ms: '{text}'")
 
     def wait_for_title(self, title_text: str, timeout_ms: int = DEFAULT_TIMEOUT):
@@ -1381,7 +1427,6 @@ class ChromeCDP:
 
                     const tag = el.tagName.toLowerCase();
                     
-                    // --- FIX: ROBUST ATTRIBUTE CHECKING ---
                     const attrSources = [
                         el.getAttribute('placeholder'),
                         el.getAttribute('aria-label'),
@@ -1392,7 +1437,6 @@ class ChromeCDP:
                         el.value
                     ];
                     
-                    // Force String() conversion to prevent "toLowerCase is not a function" crash
                     const fullSignature = attrSources
                         .map(val => {{
                             if (val === null || val === undefined) return '';
@@ -1411,6 +1455,17 @@ class ChromeCDP:
                         score += 50; 
                     }}
 
+                    // --- FIX: INPUT PRIORITY ---
+                    // If it is a real input field, give it a massive bonus.
+                    // This ensures <textarea> beats <div id="label..."> every time.
+                    if (['input', 'textarea', 'select'].includes(tag)) {{
+                        score += 50;
+                    }}
+                    // Penalize generic containers if they just happened to match by ID
+                    if (['div', 'span', 'label'].includes(tag)) {{
+                        score -= 10;
+                    }}
+
                     if (params.role) {{
                         const elRole = (el.getAttribute('role') || '').toLowerCase();
                         const elType = (el.getAttribute('type') || '').toLowerCase();
@@ -1424,9 +1479,6 @@ class ChromeCDP:
                         if (roleMatch) score += 50;
                         else score -= 20; 
                     }}
-
-                    if (tag === 'label') score -= 10; 
-                    if (['input', 'select', 'textarea', 'button'].includes(tag)) score += 30;
 
                     if (score > bestScore) {{
                         bestScore = score;
@@ -1447,7 +1499,6 @@ class ChromeCDP:
         for ctx_id in contexts_to_check:
             if not ctx_id: continue
             
-            # Debug URL printing (Optional - keeping it helps verify Frame 8 detection)
             try:
                 url_msg = self._send("Runtime.evaluate", {"expression": "window.location.href", "contextId": ctx_id})
                 url_res = self._recv(url_msg)
@@ -1462,8 +1513,6 @@ class ChromeCDP:
                 result = self._recv(msg_id)
                 remote_obj = result.get("result", {}).get("result", {})
                 
-                # --- FIX: VALIDATION CHECK ---
-                # Only accept if it is a valid DOM Node, NOT an Error object
                 subtype = remote_obj.get("subtype")
                 if subtype != "error" and "objectId" in remote_obj and subtype != "null":
                     
