@@ -364,6 +364,7 @@ class ChromeCDP:
 
     # ---------------- Page operations ----------------
     def navigate(self, url: str):
+        self.current_context_id = None
         self._send("Page.navigate", {"url": url})
 
     def get_html(self) -> str:
@@ -771,29 +772,56 @@ class ChromeCDP:
         self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
         return True
 
-    def type_human(self, text: str, xpath: str = None, label: str = None, role: str = None):
+    def type_human(self, text: str, xpath: str = None, label: str = None, role: str = None, timeout_ms: int = DEFAULT_TIMEOUT):
+        """
+        Types text like a human. Includes Smart Wait (Retry Loop).
+        """
+        deadline = time.monotonic() + timeout_ms / 1000
         try:
-            self._ensure_page_actionable()
-            obj_id = self._get_object_id(xpath, label, role)
-            if not obj_id: raise RuntimeError(f"Element not found: {xpath or label}")
+            while time.monotonic() < deadline:
+                try:
+                    self._ensure_page_actionable()
+                    
+                    # 1. Try to find the element (Retry loop handles the wait)
+                    obj_id = self._get_object_id(xpath, label, role)
+                    
+                    if not obj_id: 
+                        # Element not ready yet, wait and retry
+                        time.sleep(STEP_DELAY)
+                        continue
 
-            self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
-            point = self._get_center_by_id(obj_id)
-            if point:
-                self.mouse_move(point["x"], point["y"])
-                self.mouse_down(point["x"], point["y"])
-                self.mouse_up(point["x"], point["y"])
-            else:
-                self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
+                    # 2. Element Found! Proceed to interact
+                    self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+                    
+                    # Physical Focus (Click center)
+                    point = self._get_center_by_id(obj_id)
+                    if point:
+                        self.mouse_move(point["x"], point["y"])
+                        self.mouse_down(point["x"], point["y"])
+                        self.mouse_up(point["x"], point["y"])
+                    else:
+                        self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
+                    
+                    time.sleep(STEP_DELAY)
+                    print(f"Human typing into target...")
+                    
+                    for char in text:
+                        self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": char})
+                        self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
+                        self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
+                        jitter = (ord(char) % 3) * 0.02 
+                        time.sleep(HUMAN_DELAY + jitter)
+                    
+                    # Success - Exit the function
+                    return
+
+                except Exception:
+                    # If any step fails (e.g. detached element), retry
+                    time.sleep(STEP_DELAY)
             
-            time.sleep(STEP_DELAY)
-            print(f"Human typing into target...")
-            for char in text:
-                self._send("Input.dispatchKeyEvent", {"type": "keyDown", "key": char})
-                self._send("Input.dispatchKeyEvent", {"type": "char", "text": char})
-                self._send("Input.dispatchKeyEvent", {"type": "keyUp", "key": char})
-                jitter = (ord(char) % 3) * 0.02 
-                time.sleep(HUMAN_DELAY + jitter)
+            # If loop finishes without success
+            raise TimeoutError(f"Element not found or not interactable: {xpath or label}")
+
         except Exception as e:
             self._save_debug_screenshot("type_human_failed")
             raise e
@@ -1199,11 +1227,9 @@ class ChromeCDP:
     def _get_object_id(self, xpath: str = None, label: str = None, role: str = None):
         """
         Universal Resolver:
-        1. Tries to find element by XPath.
-        2. If failed, attempts to find element by Label + Role (Self-Healing).
-           - Checks attributes (placeholder, aria-label, title)
-           - Checks associated <label> tags (for="id")
-        3. Returns the Chrome Remote Object ID (or None).
+        1. Tries to find element by XPath (Light DOM).
+        2. Tries to find element by XPath (Deep Shadow Scan) - NEW.
+        3. Attempts to find element by Label + Role (Self-Healing).
         """
         js_params = json.dumps({
             "xpath": xpath,
@@ -1218,12 +1244,15 @@ class ChromeCDP:
             function isVisible(el) {{
                 const rect = el.getBoundingClientRect();
                 const style = window.getComputedStyle(el);
-                return (rect.width > 0 && rect.height > 0 && 
-                        style.visibility !== 'hidden' && style.display !== 'none' && 
-                        style.opacity !== '0');
+                
+                // RELAXED CHECK: Some clickable overlays have 0 height but visible overflow
+                const isGeometryVisible = (rect.width > 0 && rect.height > 0) || (style.overflow !== 'hidden');
+                const isStyleVisible = style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+                
+                return isGeometryVisible && isStyleVisible;
             }}
 
-            // --- STRATEGY 1: XPATH ---
+            // --- STRATEGY 1: STANDARD XPATH (Light DOM) ---
             if (params.xpath) {{
                 try {{
                     const snapshot = document.evaluate(params.xpath, document, null,
@@ -1235,14 +1264,42 @@ class ChromeCDP:
                 }} catch (e) {{ }}
             }}
 
-            // --- STRATEGY 2: LABEL + ROLE ---
+            // --- STRATEGY 1.5: DEEP XPATH (Shadow DOM) ---
+            // If standard XPath failed, it might be an ID or Attribute inside a Shadow Root
+            if (params.xpath) {{
+                 // Only try this scan if the XPath looks simple (e.g., //*[@id='...'])
+                 // Complex absolute paths (//html/body...) won't work in Shadow DOM anyway.
+                 const isSimpleId = params.xpath.includes("@id=") || params.xpath.startsWith("//input") || params.xpath.startsWith("//button");
+                 
+                 if (isSimpleId) {{
+                     const queue = [document];
+                     while (queue.length > 0) {{
+                         const root = queue.shift();
+                         const all = root.querySelectorAll('*');
+                         for (const el of all) {{
+                             if (el.shadowRoot) {{
+                                 queue.push(el.shadowRoot);
+                                 try {{
+                                     const snapshot = document.evaluate(params.xpath, el.shadowRoot, null,
+                                        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+                                     for (let i = 0; i < snapshot.snapshotLength; i++) {{
+                                         const match = snapshot.snapshotItem(i);
+                                         if (isVisible(match)) return match;
+                                     }}
+                                 }} catch(e) {{}}
+                             }}
+                         }}
+                     }}
+                 }}
+            }}
+
+            // --- STRATEGY 2: LABEL + ROLE (The Detective) ---
             if (!params.label) return null;
 
             let bestEl = null;
             let bestScore = -1;
             const queue = [document];
             
-            // Helper to find associated label text
             function getAssociatedLabelText(el) {{
                 let text = "";
                 if (el.id) {{
@@ -1267,7 +1324,6 @@ class ChromeCDP:
                     if (el.shadowRoot) queue.push(el.shadowRoot);
                     if (!isVisible(el)) continue;
 
-                    // --- MATCHING LOGIC ---
                     const tag = el.tagName.toLowerCase();
                     const elRole = (el.getAttribute('role') || '').toLowerCase();
                     const elType = (el.getAttribute('type') || '').toLowerCase();
@@ -1313,8 +1369,15 @@ class ChromeCDP:
         params = { "expression": expr, "returnByValue": False }
         if self.current_context_id: params["contextId"] = self.current_context_id
 
-        msg_id = self._send("Runtime.evaluate", params)
-        result = self._recv(msg_id)
+        # Robust Send: Fallback to global context if frame is stale
+        try:
+            msg_id = self._send("Runtime.evaluate", params)
+            result = self._recv(msg_id)
+        except Exception:
+             if "contextId" in params: del params["contextId"]
+             msg_id = self._send("Runtime.evaluate", params)
+             result = self._recv(msg_id)
+
         remote_obj = result.get("result", {}).get("result", {})
         
         if remote_obj.get("subtype") == "null" or "objectId" not in remote_obj: return None

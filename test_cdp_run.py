@@ -57,7 +57,7 @@ print("Proceeding to Checkout...")
 cdp.click(CHECKOUT_XPATH)
 
 print("Filling in Checkout details...")
-cdp.fill(FIRSTNAME_XPATH, "John")
+cdp.type_human(xpath=FIRSTNAME_XPATH, text="John")
 cdp.fill(LASTNAME_XPATH, "Doe")
 cdp.fill(POSTALCODE_XPATH, "12345")
 cdp.click(CONTINUE_XPATH)
