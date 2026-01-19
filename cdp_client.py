@@ -473,6 +473,36 @@ class ChromeCDP:
             time.sleep(STEP_DELAY)
         raise TimeoutError(f"Text not found within {timeout_ms}ms: '{text}'")
 
+    def wait_for_title(self, title_text: str, timeout_ms: int = DEFAULT_TIMEOUT):
+        """
+        Waits until the browser title contains the specified text.
+        Case-insensitive partial match.
+        """
+        deadline = time.monotonic() + timeout_ms / 1000
+        print(f"Waiting for title containing: '{title_text}'...")
+        
+        while time.monotonic() < deadline:
+            try:
+                # 1. Get current title via JS
+                msg_id = self._send("Runtime.evaluate", {"expression": "document.title"})
+                result = self._recv(msg_id)
+                
+                # 2. Extract value
+                current_title = result.get("result", {}).get("result", {}).get("value", "")
+                
+                # 3. Check match (Case-insensitive)
+                if title_text.lower() in current_title.lower():
+                    print(f"Title matched: '{current_title}'")
+                    return True
+                    
+            except Exception:
+                # If CDP fails momentarily (e.g. during page load), just retry
+                pass
+            
+            time.sleep(STEP_DELAY)
+            
+        raise TimeoutError(f"Title did not match '{title_text}' within {timeout_ms}ms. Last seen: '{current_title}'")
+
     # --------------- mouse handlers ----------------
     def mouse_move(self, x, y):
         self._send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "buttons": 0})
@@ -672,114 +702,97 @@ class ChromeCDP:
         raise TimeoutError(f"Page failed to stabilize within {timeout_ms}ms")
 
     def send_keys(self, keys: str, xpath: str = None, label: str = None, role: str = None, timeout_ms=DEFAULT_TIMEOUT):
-        entry = self.tracer.start_step(action="send_keys", target=xpath or label) if self.tracer.enabled else None
-        deadline = time.monotonic() + timeout_ms / 1000
-        try:
-            while time.monotonic() < deadline:
-                try:
-                    self._ensure_page_actionable(timeout_ms=PAGE_LOAD_TIMEOUT)
-                    # 1. Resolve & Focus
-                    obj_id = self._get_object_id(xpath, label, role)
-                    if not obj_id: raise RuntimeError(f"Cannot send keys; element not found: {xpath or label}")
-                    
-                    self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
-                    
-                    # --- PHYSICAL FOCUS (The Fix) ---
-                    # Instead of just JS focus(), we physically click the element center.
-                    point = self._get_center_by_id(obj_id)
-                    if point:
-                        self.mouse_move(point["x"], point["y"])
-                        self.mouse_down(point["x"], point["y"])
-                        self.mouse_up(point["x"], point["y"])
-                    else:
-                        self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
-                        
-                    time.sleep(STEP_DELAY)
+        self._ensure_page_actionable(timeout_ms=PAGE_LOAD_TIMEOUT)
+        # 1. Resolve & Focus
+        obj_id = self._get_object_id(xpath, label, role)
+        if not obj_id: raise RuntimeError(f"Cannot send keys; element not found: {xpath or label}")
+        
+        self._send("DOM.scrollIntoViewIfNeeded", {"objectId": obj_id})
+        
+        # --- PHYSICAL FOCUS (The Fix) ---
+        # Instead of just JS focus(), we physically click the element center.
+        point = self._get_center_by_id(obj_id)
+        if point:
+            self.mouse_move(point["x"], point["y"])
+            self.mouse_down(point["x"], point["y"])
+            self.mouse_up(point["x"], point["y"])
+        else:
+            self._send("Runtime.callFunctionOn", {"functionDeclaration": "function() { this.focus(); }", "objectId": obj_id})
+            
+        time.sleep(STEP_DELAY)
 
-                    # 2. Parse Modifiers
-                    modifiers, key = self._parse_key_combo(keys)
-                    mod_mask = ((2 if modifiers["Control"] else 0) | (8 if modifiers["Shift"] else 0) | (1 if modifiers["Alt"] else 0) | (4 if modifiers["Meta"] else 0))
+        # 2. Parse Modifiers
+        modifiers, key = self._parse_key_combo(keys)
+        mod_mask = ((2 if modifiers["Control"] else 0) | (8 if modifiers["Shift"] else 0) | (1 if modifiers["Alt"] else 0) | (4 if modifiers["Meta"] else 0))
 
-                    # 3. Determine Codes
-                    text = ""
-                    key_val = key
-                    code_val = "Unidentified"
-                    windows_vk = 0
-                    
-                    if key in KEY_MAP:
-                        key_val, code_val, windows_vk = KEY_MAP[key]
-                        if key == "Enter": text = "\r"
+        # 3. Determine Codes
+        text = ""
+        key_val = key
+        code_val = "Unidentified"
+        windows_vk = 0
+        
+        if key in KEY_MAP:
+            key_val, code_val, windows_vk = KEY_MAP[key]
+            if key == "Enter": text = "\r"
 
-                    elif len(key) == 1:
-                        if modifiers["Shift"]: key_val = key.upper()
-                        else: key_val = key
-                        
-                        if key.isalpha(): 
-                            code_val = f"Key{key.upper()}"
-                            windows_vk = ord(key.upper()) 
-                        elif key.isdigit(): 
-                            code_val = f"Digit{key}"
-                            windows_vk = ord(key)
-                        
-                        if not (modifiers["Control"] or modifiers["Alt"]):
-                            text = key_val
+        elif len(key) == 1:
+            if modifiers["Shift"]: key_val = key.upper()
+            else: key_val = key
+            
+            if key.isalpha(): 
+                code_val = f"Key{key.upper()}"
+                windows_vk = ord(key.upper()) 
+            elif key.isdigit(): 
+                code_val = f"Digit{key}"
+                windows_vk = ord(key)
+            
+            if not (modifiers["Control"] or modifiers["Alt"]):
+                text = key_val
 
-                    # 4. Dispatch Events
-                    self._send("Input.dispatchKeyEvent", {
-                        "type": "keyDown", 
-                        "key": key_val, 
-                        "code": code_val, 
-                        "modifiers": mod_mask, 
-                        "windowsVirtualKeyCode": windows_vk, 
-                        "nativeVirtualKeyCode": windows_vk,
-                        "text": text,
-                        "unmodifiedText": text
-                    })
+        # 4. Dispatch Events
+        self._send("Input.dispatchKeyEvent", {
+            "type": "keyDown", 
+            "key": key_val, 
+            "code": code_val, 
+            "modifiers": mod_mask, 
+            "windowsVirtualKeyCode": windows_vk, 
+            "nativeVirtualKeyCode": windows_vk,
+            "text": text,
+            "unmodifiedText": text
+        })
 
-                    if text:
-                        self._send("Input.dispatchKeyEvent", {
-                            "type": "char",
-                            "text": text,
-                            "unmodifiedText": text,
-                            "modifiers": mod_mask
-                        })
+        if text:
+            self._send("Input.dispatchKeyEvent", {
+                "type": "char",
+                "text": text,
+                "unmodifiedText": text,
+                "modifiers": mod_mask
+            })
 
-                    self._send("Input.dispatchKeyEvent", {
-                        "type": "keyUp", 
-                        "key": key_val, 
-                        "code": code_val, 
-                        "modifiers": mod_mask,
-                        "windowsVirtualKeyCode": windows_vk, 
-                        "nativeVirtualKeyCode": windows_vk
-                    })
-                    
-                    # 5. Fallback for Shadow DOM
-                    if key == "Enter":
-                        js_fallback = """
-                        function() {
-                            const ops = ['keydown', 'keypress', 'keyup'];
-                            ops.forEach(type => {
-                                this.dispatchEvent(new KeyboardEvent(type, {
-                                    key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-                                    bubbles: true, cancelable: true, view: window
-                                }));
-                            });
-                            this.dispatchEvent(new Event('change', { bubbles: true }));
-                        }
-                        """
-                        self._send("Runtime.callFunctionOn", {"functionDeclaration": js_fallback, "objectId": obj_id})
-                except Exception:
-                    if entry: self.tracer.record_retry(entry)
-                    time.sleep(STEP_DELAY)
-            raise TimeoutError(f"Send_Keys failed: {xpath or label}")    
-        except Exception as e:
-            if entry:
-                self.tracer.failure(entry, e)
-                self._capture_failure_artifacts(entry)
-                self.tracer.dump()
-            else:
-                self._save_debug_screenshot("send_keys_failed")
-            raise
+        self._send("Input.dispatchKeyEvent", {
+            "type": "keyUp", 
+            "key": key_val, 
+            "code": code_val, 
+            "modifiers": mod_mask,
+            "windowsVirtualKeyCode": windows_vk, 
+            "nativeVirtualKeyCode": windows_vk
+        })
+        
+        # 5. Fallback for Shadow DOM
+        if key == "Enter":
+            js_fallback = """
+            function() {
+                const ops = ['keydown', 'keypress', 'keyup'];
+                ops.forEach(type => {
+                    this.dispatchEvent(new KeyboardEvent(type, {
+                        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+                        bubbles: true, cancelable: true, view: window
+                    }));
+                });
+                this.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            """
+            self._send("Runtime.callFunctionOn", {"functionDeclaration": js_fallback, "objectId": obj_id})
         
 
     def scroll_into_view(self, xpath: str = None, label: str = None, role: str = None):

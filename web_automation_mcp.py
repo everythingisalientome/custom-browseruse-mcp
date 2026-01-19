@@ -94,6 +94,33 @@ async def navigate(url: str):
     except Exception as e:
         return err("NAVIGATION_FAILED", str(e))
 
+@app.tool()
+async def wait_for_page_title(title_text: str):
+    """
+    Waits for the browser page title to contain the given text.
+    Useful for verifying navigation (e.g. wait for 'Dashboard' or 'Login').
+    """
+    try:
+        cdp.wait_for_title(title_text)
+        return ok(message=f"Page title now contains: '{title_text}'")
+    except Exception as e:
+        return err("WAIT_TITLE_FAILED", str(e))
+
+@app.tool()
+async def wait_for_element(xpath: str = None, label: str = None, role: str = None):
+    """
+    Wait for an element on page.
+    Args:
+        xpath: The strict XPath (Preferred).
+        label: Visual text of the button (Fallback).
+        role: Type of element e.g. 'button', 'link' (Fallback).
+    """
+    try:
+        # We pass all 3 to CDP. The 'Smart Driver' handles the fallback internally.
+        cdp.wait_for_element(xpath, label, role)
+        return ok(message=f"Successfully Waited for Element {xpath or label}")
+    except Exception as e:
+        return err("WAIT_ELEMENT_FAILED", str(e))
 
 # ---------------- Mouse and keyboard tools ----------------
 
