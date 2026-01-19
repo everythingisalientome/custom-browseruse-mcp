@@ -776,6 +776,7 @@ class ChromeCDP:
         """
         Types text like a human. Includes Smart Wait (Retry Loop).
         """
+        entry = self.tracer.start_step(action="type_human", target=xpath or label) if self.tracer.enabled else None
         deadline = time.monotonic() + timeout_ms / 1000
         try:
             while time.monotonic() < deadline:
@@ -822,32 +823,54 @@ class ChromeCDP:
             # If loop finishes without success
             raise TimeoutError(f"Element not found or not interactable: {xpath or label}")
 
-        except Exception as e:
-            self._save_debug_screenshot("type_human_failed")
+        except Exception as e:            
+            if entry:
+                self.tracer.failure(entry, e)
+                self._capture_failure_artifacts(entry)
+                self.tracer.dump()
+            else:
+                self._save_debug_screenshot("type_human_failed")
             raise e
 
-    def get_text(self, xpath: str = None, label: str = None, role: str = None) -> str:
-        self._ensure_page_actionable()
-        obj_id = self._get_object_id(xpath, label, role)
-        if not obj_id: raise RuntimeError(f"Element not found for text retrieval: {xpath or label}")
+    def get_text(self, xpath: str = None, label: str = None, role: str = None, timeout_ms: int = DEFAULT_TIMEOUT) -> str:
+        entry = self.tracer.start_step(action="get_text", target=xpath or label) if self.tracer.enabled else None
+        deadline = time.monotonic() + timeout_ms / 1000
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    self._ensure_page_actionable()
+                    obj_id = self._get_object_id(xpath, label, role)
+                    if not obj_id: raise RuntimeError(f"Element not found for text retrieval: {xpath or label}")
 
-        expr = """
-        function() {
-            const el = this;
-            const tag = el.tagName.toLowerCase();
-            const inputTypes = ['text', 'password', 'email', 'number', 'search', 'url', 'tel', 'date'];
-            if (tag === 'textarea' || (tag === 'input' && inputTypes.includes(el.type))) return el.value || el.getAttribute('placeholder') || '';
-            if (tag === 'input' && ['button', 'submit', 'reset'].includes(el.type)) return el.value || '';
-            if (tag === 'select') return el.options[el.selectedIndex].text || '';
-            
-            if (el.shadowRoot) {
-                 return el.shadowRoot.textContent || el.innerText || '';
-            }
-            return el.innerText || el.textContent || '';
-        }
-        """
-        msg_id = self._send("Runtime.callFunctionOn", {"objectId": obj_id, "functionDeclaration": expr, "returnByValue": True})
-        return str(self._recv(msg_id)["result"]["result"].get("value", "")).strip()
+                    expr = """
+                    function() {
+                        const el = this;
+                        const tag = el.tagName.toLowerCase();
+                        const inputTypes = ['text', 'password', 'email', 'number', 'search', 'url', 'tel', 'date'];
+                        if (tag === 'textarea' || (tag === 'input' && inputTypes.includes(el.type))) return el.value || el.getAttribute('placeholder') || '';
+                        if (tag === 'input' && ['button', 'submit', 'reset'].includes(el.type)) return el.value || '';
+                        if (tag === 'select') return el.options[el.selectedIndex].text || '';
+                        
+                        if (el.shadowRoot) {
+                            return el.shadowRoot.textContent || el.innerText || '';
+                        }
+                        return el.innerText || el.textContent || '';
+                    }
+                    """
+                    msg_id = self._send("Runtime.callFunctionOn", {"objectId": obj_id, "functionDeclaration": expr, "returnByValue": True})
+                    return str(self._recv(msg_id)["result"]["result"].get("value", "")).strip()
+                except Exception:
+                    if entry: self.tracer.record_retry(entry)
+                    time.sleep(STEP_DELAY)
+            raise TimeoutError(f"Get Text failed: {xpath or label}")
+        except Exception as e:
+            if entry:
+                self.tracer.failure(entry, e)
+                self._capture_failure_artifacts(entry)
+                self.tracer.dump()
+            else:
+                self._save_debug_screenshot("get_text")
+            raise
 
     def scrape_table(self, table_xpath: str, next_page_xpath: str = None, max_pages: int = 0, total_pages_xpath: str = None):
         SAFETY_LIMIT = 50 
