@@ -1673,7 +1673,18 @@ class ChromeCDP:
         except Exception: pass
 
     # ---------------- Tab & Frame Management ----------------
-
+    def new_tab(self, url: str):
+        """
+        Opens a new tab with the specified URL and switches control to it.
+        """
+        print(f"Opening new tab: {url}")
+        # Use Javascript to open a new window/tab
+        self._send("Runtime.evaluate", {"expression": f"window.open('{url}', '_blank')"})
+        time.sleep(2) # Wait for tab to open
+        
+        # Automatically switch to the new tab (it will be the last one in the list)
+        self.switch_to_tab(index=-1)
+        
     def get_tabs(self):
         """
         Returns a list of all open browser tabs (targets).
@@ -1733,7 +1744,12 @@ class ChromeCDP:
         except Exception as e:
             raise RuntimeError(f"Failed to connect to new tab: {e}")
 
+        # --- CONTEXT RESET (The Fix) ---
+        # When entering a new app, we must forget all frames from the old app.
+        self.current_context_id = None
+        self.context_map = {} 
         self._inflight_requests = 0
+        # -------------------------------
         self._enable_domains()
         self.force_viewport(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
         

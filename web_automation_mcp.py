@@ -277,23 +277,45 @@ async def select_option(xpath: str, value: str = None, label: str = None):
 # --- NEW TOOLS FOR TABS & FRAMES ---
 
 @app.tool()
-async def switch_tab(keyword: str = None, new_tab: bool = False):
+async def new_tab(url: str):
     """
-    Switches the browser focus to a different tab.
-    Args:
-        keyword: (Optional) A word to look for in the tab's Title or URL.
-        new_tab: (Optional) If True, switches to the NEWEST tab (index -1).
+    Opens a new browser tab with the specified URL and automatically switches control to it.
+    Use this when you need to work with multiple applications simultaneously (e.g. ServiceNow and Jira).
     """
     try:
-        if new_tab:
-            cdp.switch_to_tab(index=-1)
-        elif keyword:
-            cdp.switch_to_tab(keyword=keyword)
-        else:
-            return err("INVALID_ARGS", "Must provide either 'keyword' or 'new_tab=True'")
-        return ok(message="Switched tab successfully")
+        cdp.new_tab(url)
+        return ok(message=f"Opened new tab for {url} and switched control to it.")
     except Exception as e:
-        return err("SWITCH_FAILED", str(e))
+        return err("NEW_TAB_FAILED", str(e))
+
+@app.tool()
+async def get_tabs():
+    """
+    Returns a list of all open browser tabs. 
+    Useful for finding the index or title of a specific tab to switch to.
+    """
+    try:
+        tabs = cdp.get_tabs()
+        # Format the output to be agent-friendly
+        tab_list = []
+        for i, t in enumerate(tabs):
+            tab_list.append(f"Index {i}: {t.get('title', 'No Title')} ({t.get('url', 'No URL')})")
+            
+        return ok(message="Open Tabs:\n" + "\n".join(tab_list))
+    except Exception as e:
+        return err("GET_TABS_FAILED", str(e))
+
+@app.tool()
+async def switch_tab(keyword: str = None, index: int = None):
+    """
+    Switches control to an existing open tab.
+    You can identify the tab by a keyword in its title/URL (e.g. "Jira") or its numeric index from 'get_tabs'.
+    """
+    try:
+        cdp.switch_to_tab(keyword=keyword, index=index)
+        return ok(message=f"Switched control to tab matching keyword='{keyword}' or index={index}")
+    except Exception as e:
+        return err("SWITCH_TAB_FAILED", str(e))
 
 @app.tool()
 async def get_frames():
